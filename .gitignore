@@ -1,0 +1,62 @@
+# ===== Rust / Cargo =====
+/target/
+**/*.rs.bk
+*.pdb
+# Cargo.lock は本プロジェクトがバイナリのためコミットする(ignore しない)
+
+# cargo-mutants / criterion などの生成物
+/mutants.out*/
+/criterion/
+
+# ===== プロファイリング・カバレッジ =====
+*.profraw
+*.profdata
+/coverage/
+lcov.info
+tarpaulin-report.html
+cobertura.xml
+
+# ===== macOS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ===== Windows =====
+Thumbs.db
+Desktop.ini
+
+# ===== Linux =====
+*~
+.directory
+
+# ===== エディタ / IDE =====
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*.swn
+.zed/
+*.sublime-workspace
+
+# ===== 環境変数・秘密情報 =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ===== ログ・一時ファイル =====
+*.log
+*.tmp
+*.bak
+*.orig
+scratch/
+tmp/
+
+# ===== Claude Code(ローカル設定のみ除外)=====
+.claude/settings.local.json
+CLAUDE.local.md

@@ -1,0 +1,16 @@
+[package]
+name = "token-slim-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "Token-slimming MCP server: read/search/compress with minimal token output for any LLM client (Claude Code, Codex, Cursor, Gemini CLI, ...)"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
