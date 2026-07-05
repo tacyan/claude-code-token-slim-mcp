@@ -60,3 +60,6 @@ tmp/
 # ===== Claude Code(ローカル設定のみ除外)=====
 .claude/settings.local.json
 CLAUDE.local.md
+
+# ===== fable5 ハーネス状態 =====
+.fable5/
