@@ -116,6 +116,16 @@ cp -r skills/slim ~/.claude/skills/
 
 以降、任意のリポジトリ・フォルダのセッションで `/slim` と打つと、ファイル読取→`read_slim`、検索→`grep_slim`、一覧→`dir_map` に置き換わります。MCP 未登録でも同梱の `ts.sh` がバイナリを直接呼び出すため動作します(探索順: `$TOKEN_SLIM_BIN` → `~/dev/claude-code-token-slim-mcp/target/release/` → `PATH` → `~/.cargo/bin/`)。
 
+### Claude Code スキル `/bulk`(同梱)
+
+`/slim` と対になる爆速モードを [`skills/bulk/`](skills/bulk/) に同梱しています。サブエージェントの並列大量投入と多段ワークフローでトークンを一気に使い、壁時計時間を最小化します(オーケストレータ側は `/slim` 規律で軽量のまま)。導入:
+
+```bash
+cp -r skills/bulk ~/.claude/skills/
+```
+
+任意のセッションで `/bulk <ミッション>` と打つと、その起動自体がマルチエージェント編成へのオプトインになります。`/slim` と併用すると最大効果です。
+
 ## モデルに使わせるための推奨設定(重要)
 
 MCP ツールは「登録しただけ」では標準の Read/Grep より優先されないことがあります。プロジェクトの `CLAUDE.md` や `AGENTS.md` に以下を追記すると、恒常的に削減されます:
