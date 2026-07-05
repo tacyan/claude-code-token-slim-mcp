@@ -24,17 +24,35 @@ LLM のトークン消費の大半は「ファイルの中身・検索結果・A
 
 全ツールの応答先頭に `[token-slim] ~4835→~238 tok (-95%)` の形式で削減実績が付きます。
 
-## ビルド
+## インストール
+
+Rust([rustup](https://rustup.rs/))が必要です。
+
+### 方法 A: cargo install(推奨・パスが環境に依存しない)
 
 ```bash
-cd /Users/tacyan/dev/claude-code-token-slim-mcp
-cargo build --release
-# → target/release/token-slim-mcp
+git clone https://github.com/<your-account>/token-slim-mcp.git
+cd token-slim-mcp
+cargo install --path .
 ```
 
-## クライアント設定(一度設定すればずっと有効)
+バイナリは `~/.cargo/bin/token-slim-mcp` に入ります(以降の設定例はこのパスを使用)。
 
-バイナリのフルパス: `/Users/tacyan/dev/claude-code-token-slim-mcp/target/release/token-slim-mcp`
+### 方法 B: 手動ビルド
+
+```bash
+git clone https://github.com/<your-account>/token-slim-mcp.git
+cd token-slim-mcp
+cargo build --release
+# → <クローンした場所>/target/release/token-slim-mcp
+```
+
+方法 B の場合は、以降の設定例の `~/.cargo/bin/token-slim-mcp` を
+`<クローンした場所>/target/release/token-slim-mcp` の**絶対パス**に読み替えてください。
+
+> **注意**: MCP クライアントによっては `~` を展開しないものがあります。うまく接続できない場合はフルパス(例: `/Users/<ユーザー名>/.cargo/bin/token-slim-mcp`、Linux なら `/home/<ユーザー名>/...`)で指定してください。パスは `which token-slim-mcp` で確認できます。
+
+## クライアント設定(一度設定すればずっと有効)
 
 ### Claude Code
 
@@ -42,15 +60,17 @@ cargo build --release
 # 全プロジェクトで有効(user スコープ)
 claude mcp add --scope user token-slim \
   --env TOKEN_SLIM_MAX_TOKENS=4000 \
-  -- /Users/tacyan/dev/claude-code-token-slim-mcp/target/release/token-slim-mcp
+  -- ~/.cargo/bin/token-slim-mcp
 ```
 
 ### Codex CLI(`~/.codex/config.toml`)
 
 ```toml
 [mcp_servers.token-slim]
-command = "/Users/tacyan/dev/claude-code-token-slim-mcp/target/release/token-slim-mcp"
-env = { TOKEN_SLIM_MAX_TOKENS = "4000" }
+command = "~/.cargo/bin/token-slim-mcp"
+
+[mcp_servers.token-slim.env]
+TOKEN_SLIM_MAX_TOKENS = "4000"
 ```
 
 ### Cursor(`~/.cursor/mcp.json` またはプロジェクトの `.cursor/mcp.json`)
@@ -59,16 +79,20 @@ env = { TOKEN_SLIM_MAX_TOKENS = "4000" }
 {
   "mcpServers": {
     "token-slim": {
-      "command": "/Users/tacyan/dev/claude-code-token-slim-mcp/target/release/token-slim-mcp",
+      "command": "~/.cargo/bin/token-slim-mcp",
       "env": { "TOKEN_SLIM_MAX_TOKENS": "4000" }
     }
   }
 }
 ```
 
-### Claude Desktop(`~/Library/Application Support/Claude/claude_desktop_config.json`)
+### Claude Desktop
 
-Cursor と同じ `mcpServers` 形式。
+設定ファイルの場所:
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+Cursor と同じ `mcpServers` 形式です(Claude Desktop は `~` を展開しないためフルパス推奨)。
 
 ### Gemini CLI(`~/.gemini/settings.json`)
 
@@ -76,7 +100,7 @@ Cursor と同じ `mcpServers` 形式。
 {
   "mcpServers": {
     "token-slim": {
-      "command": "/Users/tacyan/dev/claude-code-token-slim-mcp/target/release/token-slim-mcp"
+      "command": "~/.cargo/bin/token-slim-mcp"
     }
   }
 }
