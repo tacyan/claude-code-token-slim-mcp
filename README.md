@@ -31,8 +31,8 @@ Rust([rustup](https://rustup.rs/))が必要です。
 ### 方法 A: cargo install(推奨・パスが環境に依存しない)
 
 ```bash
-git clone https://github.com/tacyan/token-slim-mcp.git
-cd token-slim-mcp
+git clone https://github.com/tacyan/claude-code-token-slim-mcp.git
+cd claude-code-token-slim-mcp
 cargo install --path .
 ```
 
@@ -41,8 +41,8 @@ cargo install --path .
 ### 方法 B: 手動ビルド
 
 ```bash
-git clone https://github.com/tacyan/token-slim-mcp.git
-cd token-slim-mcp
+git clone https://github.com/tacyan/claude-code-token-slim-mcp.git
+cd claude-code-token-slim-mcp
 cargo build --release
 # → <クローンした場所>/target/release/token-slim-mcp
 ```

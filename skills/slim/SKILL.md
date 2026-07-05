@@ -42,7 +42,7 @@ re-read this skill if you lose them.
    config — keep it that way; never suggest editing the server for one client.)
 
 3. **Binary missing too** — install it (works on any machine):
-   `git clone https://github.com/tacyan/token-slim-mcp && cd token-slim-mcp && cargo install --path .`
+   `git clone https://github.com/tacyan/claude-code-token-slim-mcp && cd claude-code-token-slim-mcp && cargo install --path .`
    (lands in `~/.cargo/bin`, auto-discovered by ts.sh). As a LAST resort run
    under the "no-tool discipline" (Step 2 rules B only, using narrow
    built-in reads and `head`-capped Bash output).

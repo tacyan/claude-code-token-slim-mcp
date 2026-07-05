@@ -19,7 +19,7 @@ if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
 fi
 if [ ! -x "$BIN" ]; then
   echo "token-slim-mcp binary not found. Set TOKEN_SLIM_BIN, or install it:" >&2
-  echo "  git clone https://github.com/tacyan/token-slim-mcp && cd token-slim-mcp && cargo install --path ." >&2
+  echo "  git clone https://github.com/tacyan/claude-code-token-slim-mcp && cd claude-code-token-slim-mcp && cargo install --path ." >&2
   exit 127
 fi
 
