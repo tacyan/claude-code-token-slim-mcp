@@ -15,7 +15,8 @@ pub fn comment_style(ext: &str) -> CommentStyle {
     match ext {
         "rs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "java" | "c" | "h" | "cpp"
         | "cc" | "hpp" | "go" | "swift" | "kt" | "kts" | "scala" | "cs" | "dart" | "php"
-        | "css" | "scss" | "less" | "proto" | "zig" | "m" | "mm" => CommentStyle {
+        | "css" | "scss" | "less" | "proto" | "zig" | "m" | "mm" | "json" | "jsonc"
+        | "json5" => CommentStyle {
             line: &["//"],
             block: &[("/*", "*/")],
         },
@@ -222,8 +223,9 @@ fn md_re() -> &'static Regex {
     MD_RE.get_or_init(|| Regex::new(r"^#{1,6}\s").unwrap())
 }
 
-/// Extract signature/heading lines with line numbers.
-pub fn outline(src: &str, ext: &str) -> String {
+/// Extract signature/heading lines with line numbers, or None when the
+/// file has no recognizable structure (config/data/plain text).
+pub fn outline_opt(src: &str, ext: &str) -> Option<String> {
     let mut out: Vec<String> = Vec::new();
     let is_md = matches!(ext, "md" | "mdx" | "markdown");
     for (i, line) in src.lines().enumerate() {
@@ -241,9 +243,120 @@ pub fn outline(src: &str, ext: &str) -> String {
         }
     }
     if out.is_empty() {
-        return "(no signatures/headings found — try mode=slim)".to_string();
+        return None;
     }
-    out.join("\n")
+    Some(out.join("\n"))
+}
+
+/// Extract signature/heading lines with line numbers.
+pub fn outline(src: &str, ext: &str) -> String {
+    outline_opt(src, ext)
+        .unwrap_or_else(|| "(no signatures/headings found — try mode=slim)".to_string())
+}
+
+/// Strip JSONC extensions so a strict JSON parser accepts the text:
+/// `//` line comments, `/* */` block comments and trailing commas before
+/// `}` / `]`. String literals are preserved verbatim, and newlines inside
+/// removed comments are kept so reported line numbers stay accurate.
+pub fn strip_jsonc(src: &str) -> String {
+    drop_trailing_commas(&strip_json_comments(src))
+}
+
+fn strip_json_comments(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let n = chars.len();
+    let mut out: Vec<char> = Vec::with_capacity(n);
+    let mut i = 0usize;
+    let mut in_str = false;
+
+    while i < n {
+        let c = chars[i];
+        if in_str {
+            out.push(c);
+            if c == '\\' && i + 1 < n {
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_str = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            i += 2;
+            while i < n && !(chars[i] == '*' && i + 1 < n && chars[i + 1] == '/') {
+                if chars[i] == '\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            i = (i + 2).min(n);
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out.into_iter().collect()
+}
+
+/// Drop each `,` whose next significant character closes a container.
+/// Runs after comment removal so `[1, 2, /* x */]` is handled too.
+fn drop_trailing_commas(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let n = chars.len();
+    let mut out: Vec<char> = Vec::with_capacity(n);
+    let mut i = 0usize;
+    let mut in_str = false;
+
+    while i < n {
+        let c = chars[i];
+        if in_str {
+            out.push(c);
+            if c == '\\' && i + 1 < n {
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_str = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == ',' {
+            let mut j = i + 1;
+            while j < n && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < n && (chars[j] == '}' || chars[j] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out.into_iter().collect()
 }
 
 pub struct JsonOpts {
@@ -350,6 +463,43 @@ mod tests {
         let out = outline("# Title\ntext\n## Sub\n", "md");
         assert!(out.contains("L1: # Title"));
         assert!(out.contains("L3: ## Sub"));
+    }
+
+    #[test]
+    fn strips_jsonc_comments_and_trailing_commas() {
+        let src = "{\n  // lockfile version\n  \"lockfileVersion\": 1, /* inline */\n  \"list\": [1, 2, 3,],\n}\n";
+        let out = strip_jsonc(src);
+        let v: Value = serde_json::from_str(&out).expect("parses after jsonc strip");
+        assert_eq!(v["lockfileVersion"], 1);
+        assert_eq!(v["list"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn jsonc_strip_handles_comma_before_comment_and_close() {
+        let src = "{\n  \"a\": [1, 2 /* two */,],  // tail\n}\n";
+        let v: Value = serde_json::from_str(&strip_jsonc(src)).unwrap();
+        assert_eq!(v["a"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn jsonc_strip_keeps_string_contents() {
+        let src = "{\"url\": \"https://x.dev//a\", \"c\": \"/* not a comment */\", \"t\": \"a,\"}";
+        let v: Value = serde_json::from_str(&strip_jsonc(src)).unwrap();
+        assert_eq!(v["url"], "https://x.dev//a");
+        assert_eq!(v["c"], "/* not a comment */");
+        assert_eq!(v["t"], "a,");
+    }
+
+    #[test]
+    fn jsonc_strip_preserves_line_numbers() {
+        let src = "{\n/* a\nb */\n\"k\": 1\n}";
+        assert_eq!(strip_jsonc(src).lines().count(), src.lines().count());
+    }
+
+    #[test]
+    fn outline_opt_none_for_data_files() {
+        assert!(outline_opt("{\"a\": 1}", "json").is_none());
+        assert!(outline_opt("fn a() {}", "rs").is_some());
     }
 
     #[test]
