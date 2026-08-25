@@ -7,7 +7,8 @@ description: Token-slim mode — cut this session's token usage by routing every
 
 Purpose: for the REST OF THIS SESSION, minimize tokens spent on tool results
 and on your own output. Measured savings on real files: `-32%` reading Rust
-source with comments stripped (mode=slim), `-95%` with mode=outline, `-41%`
+source with comments stripped (mode=slim), `-95%` with the default mode=auto
+outline on a large file, `-41%`
 on commented Python. These rules stay active after context compaction —
 re-read this skill if you lose them.
 
@@ -56,10 +57,11 @@ slim mode ON + which path (MCP / direct binary / discipline-only).
 
 | Instead of…                    | Use                                                        |
 |--------------------------------|------------------------------------------------------------|
-| Read (whole file)              | `read_slim {path}` — comments/blanks stripped, capped      |
-| Read (first look at big file)  | `read_slim {path, mode:"outline"}` (-95%), then drill down |
-| Read (specific range)          | `read_slim {path, offset, limit}`                          |
-| Grep / rg                      | `grep_slim {pattern, path, ext, max_results}`              |
+| Read (first look at any file)  | `read_slim {path}` — auto: outline (-95%) for big files, slim body for small ones |
+| Read (specific range)          | `read_slim {path, offset, limit}` — the drill-down after an outline |
+| Read (whole body on purpose)   | `read_slim {path, mode:"slim"}` — only when you truly need it |
+| Grep / rg                      | `grep_slim {pattern, path, ext, max_results, exclude}`     |
+| Grep with test noise           | `grep_slim {..., exclude_tests: true}` — usually the biggest single win |
 | ls / Glob / tree               | `dir_map {path, depth}`                                    |
 | cat of JSON / big API response | `json_slim {path}` or `json_slim {json}`                   |
 | quoting long text back         | `text_slim {text, level:"aggressive"}`                     |
@@ -70,9 +72,16 @@ for budgeting. Caps are tunable per call (`max_tokens`, `max_results`,
 `depth`) or via env (`TOKEN_SLIM_MAX_TOKENS`, `TOKEN_SLIM_GREP_MAX_RESULTS`,
 `TOKEN_SLIM_DIR_MAX_ENTRIES`).
 
+`read_slim {path}` defaults to `mode=auto`: it returns the outline
+(signatures + line numbers, nothing silently dropped) whenever the file is
+big enough for the body to be worth skipping, and the slimmed body
+otherwise. The header always says which one you got — `mode=outline(auto)`
+means bodies are NOT in context; fetch them with `offset`/`limit`. Never
+re-read the whole file just because you got an outline.
+
 **Claude Code Edit exception**: `Edit` requires exact text previously seen via
 the built-in `Read`. Workflow: locate the target with `grep_slim` /
-`read_slim mode=outline` first, then `Read` ONLY the narrow `offset`/`limit`
+`read_slim` (outline) first, then `Read` ONLY the narrow `offset`/`limit`
 range you will edit. Never full-file `Read` when a range suffices.
 
 ### B. Output discipline (applies even with zero tools)
@@ -90,10 +99,10 @@ range you will edit. Never full-file `Read` when a range suffices.
 
 ## Tool cheat sheet (exact schemas)
 
-- `read_slim {path, offset?, limit?, mode?: slim|outline|raw, strip_comments?, max_tokens?}`
-- `grep_slim {pattern, path?, ext?: "rs,toml", literal?, ignore_case?, max_results?}`
+- `read_slim {path, offset?, limit?, mode?: auto|slim|outline|raw, strip_comments?, max_tokens?}`
+- `grep_slim {pattern, path?, ext?: "rs,toml", literal?, ignore_case?, max_results?, exclude?: ["**/test/**"], exclude_tests?, include?}`
 - `dir_map {path?, depth? (default 3), max_entries?}`
-- `json_slim {json | path, max_array?, max_depth?, max_string?}`
+- `json_slim {json | path, max_array?, max_depth?, max_string?}` — JSONC (comments / trailing commas: bun.lock, tsconfig.json, .vscode/*.json) parses too
 - `text_slim {text, level?: normal|aggressive, max_tokens?}`
 - `token_count {path | text}`
 

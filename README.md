@@ -14,15 +14,36 @@ LLM のトークン消費の大半は「ファイルの中身・検索結果・A
 
 | ツール | 代替対象 | 削減内容 | 削減目安 |
 |---|---|---|---|
-| `read_slim` | 通常の Read/cat | コメント・空行除去+トークン上限キャップ(先頭+末尾保持) | 10〜60% |
-| `read_slim` (mode=outline) | ファイル全読み | 関数/クラス/見出しのシグネチャ行のみ抽出 | **90%以上** |
-| `grep_slim` | grep / 検索ツール | `path:行番号:一致行` のみ・件数上限・vendor/バイナリ除外 | 大 |
+| `read_slim` (既定 mode=auto) | ファイル全読み | 大きなコードファイルは**アウトライン**(関数/クラス/見出し+行番号)、小さい・非構造ファイルは slim 本文 | **90%以上** / 10〜60% |
+| `read_slim` (mode=slim) | 通常の Read/cat | コメント・空行除去+トークン上限キャップ(先頭+末尾保持) | 10〜60% |
+| `grep_slim` | grep / 検索ツール | `path:行番号:一致行` のみ・件数上限・vendor/バイナリ除外・**glob 除外**(`exclude` / `exclude_tests`) | 大 |
 | `dir_map` | ls -R / find | 1行1エントリの省トークンツリー(深さ・件数上限) | 大 |
-| `json_slim` | JSON 全貼り | minify+深さ制限+配列サンプリング+長文字列切詰め | 50〜99% |
+| `json_slim` | JSON 全貼り | minify+深さ制限+配列サンプリング+長文字列切詰め。**JSONC 対応**(コメント・末尾カンマ) | 50〜99% |
 | `text_slim` | ログ全貼り | 空行・空白圧縮、重複行の集約 | 内容次第 |
 | `token_count` | — | 貼る前にトークン数を見積もる(±20%) | — |
 
 全ツールの応答先頭に `[token-slim] ~4835→~238 tok (-95%)` の形式で削減実績が付きます。
+
+### read_slim の既定は「まずアウトライン」
+
+大きなファイルで本文を返すと、上限にかかって**中間が黙って切り捨てられます**(例: `src/tools.rs` は mode=slim で `-48% [capped]`)。既定の `mode=auto` は、そういうファイルでは代わりに構造だけを完全な形で返します(`-95%`、欠落は「本文」だけと明示)。
+
+```
+[token-slim] src/tools.rs mode=outline(auto) lines=626 ~6426→~292 tok (-95%)
+  — structure only, no bodies: fetch a function with offset/limit, or the whole file with mode=slim
+L69: pub fn tool_definitions() -> Value {
+L140: pub fn call(params: &Value) -> Result<Value, (i64, String)> {
+...
+```
+
+必要な関数だけ `offset`/`limit` で取りに行く流れになるため、事故が少なく削減も大きくなります。判定基準:
+
+- `offset`/`limit` 指定時は常に本文(その呼び出し自体がドリルダウン)
+- 本文が `max_tokens` を超える(=切り捨てが発生する)ならアウトライン
+- そうでなくても、本文が `TOKEN_SLIM_AUTO_OUTLINE_MIN_TOKENS`(既定 400)超 かつ アウトラインが本文の半分以下ならアウトライン
+- 上記以外(小さいファイル、シグネチャが無い設定/データファイル)は slim 本文
+
+`mode` を明示すればいつでも上書きでき、既定自体も `TOKEN_SLIM_DEFAULT_MODE=slim` で戻せます。
 
 ## インストール
 
@@ -141,6 +162,8 @@ read_slim / grep_slim / dir_map を優先して使うこと。
 | 変数 | 既定値 | 意味 |
 |---|---|---|
 | `TOKEN_SLIM_MAX_TOKENS` | 4000 | read_slim / text_slim の出力トークン上限 |
+| `TOKEN_SLIM_DEFAULT_MODE` | auto | read_slim の既定モード(auto/slim/outline/raw) |
+| `TOKEN_SLIM_AUTO_OUTLINE_MIN_TOKENS` | 400 | auto がアウトラインを選び始める本文サイズ |
 | `TOKEN_SLIM_GREP_MAX_RESULTS` | 50 | grep_slim の結果件数上限 |
 | `TOKEN_SLIM_DIR_MAX_ENTRIES` | 300 | dir_map の合計エントリ上限 |
 | `TOKEN_SLIM_JSON_MAX_DEPTH` | 6 | json_slim の深さ上限 |
@@ -154,10 +177,10 @@ read_slim / grep_slim / dir_map を優先して使うこと。
 ### read_slim
 ```jsonc
 { "path": "src/main.rs",        // 必須
-  "mode": "slim",               // slim(既定) | outline | raw
+  "mode": "auto",               // auto(既定) | slim | outline | raw
   "max_tokens": 4000,           // 出力上限(超過分は中間を snip)
-  "offset": 100, "limit": 50,   // 行範囲指定
-  "strip_comments": true }      // slim 時のコメント除去
+  "offset": 100, "limit": 50,   // 行範囲指定(指定時は常に本文)
+  "strip_comments": true }      // slim/auto 時のコメント除去
 ```
 対応言語(コメント除去): Rust, JS/TS, Python, Go, Java, C/C++, C#, Swift, Kotlin, Ruby, Shell, SQL, Lua, HTML/XML, YAML, TOML ほか。
 
@@ -168,8 +191,27 @@ read_slim / grep_slim / dir_map を優先して使うこと。
   "ext": "rs,toml",             // 拡張子フィルタ
   "max_results": 50,
   "ignore_case": false,
-  "literal": false }            // true でリテラル一致
+  "literal": false,             // true でリテラル一致
+  "exclude": ["**/test/**"],    // glob 除外(* ? ** 対応、"a,b" 文字列も可)
+  "exclude_tests": false,       // true で test/spec/fixture 系を一括除外
+  "include": ["src/**"] }       // 指定時はこれに一致するパスのみ検索
 ```
+
+glob は `*`(1セグメント内の任意文字)・`?`・`**`(0個以上のセグメント)に対応。
+スラッシュを含まないパターン(`tests`、`*.spec.ts`)は任意のパスセグメントに一致し、
+複数セグメントのパターン(`tests/**`)は階層の途中(`crates/foo/tests/…`)にも一致します。
+除外ディレクトリは走査自体をスキップするため、除外は速度にも効きます。
+
+```
+# before
+[token-slim] grep /read_slim/ in .: 29 matches, 13 files scanned
+# after
+[token-slim] grep /read_slim/ in .: 4 matches, 8 files scanned, exclude=**/tests/**,README.md,skills, 1 files skipped
+```
+
+`exclude_tests: true` は `**/test/**` `**/tests/**` `**/__tests__/**` `**/spec/**`
+`**/testdata/**` `**/fixtures/**` `*_test.*` `*.test.*` `*.spec.*` などに展開されます。
+ヘッダーには常に有効なフィルタが表示されるので、0 件を「どこにも無い」と誤読しません。
 
 ### dir_map
 ```jsonc
@@ -178,9 +220,14 @@ read_slim / grep_slim / dir_map を優先して使うこと。
 
 ### json_slim
 ```jsonc
-{ "json": "{...}",              // または "path": "package-lock.json"
+{ "json": "{...}",              // または "path": "bun.lock" / "tsconfig.json"
   "max_depth": 6, "max_array": 20, "max_string": 200 }
 ```
+**JSONC 対応**: まず厳密な JSON として解析し、失敗した場合のみ `//` 行コメント・
+`/* */` ブロックコメント・末尾カンマを除去して再解析します(文字列リテラル内は保護、
+行番号もずれません)。`bun.lock` / `tsconfig.json` / `.vscode/*.json` がそのまま通ります。
+JSONC 経路を通った場合はヘッダーに `jsonc (comments/trailing commas stripped)` と出ます。
+本当に壊れた JSON はこれまで通りエラーになります。
 
 ### text_slim
 ```jsonc
@@ -201,7 +248,7 @@ read_slim / grep_slim / dir_map を優先して使うこと。
 ## 開発
 
 ```bash
-cargo test        # ユニット11件+MCP 統合テスト1件
+cargo test        # ユニット22件+MCP 統合テスト1件
 cargo build --release
 ```
 

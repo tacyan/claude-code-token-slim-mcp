@@ -1,6 +1,7 @@
 //! token-slim-mcp: MCP server (JSON-RPC 2.0 over stdio, newline-delimited)
 //! that exposes token-slimming tools usable from any MCP client.
 
+mod glob;
 mod slim;
 mod tokens;
 mod tools;
@@ -87,7 +88,8 @@ fn initialize_result(params: &Value) -> Value {
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": "Token-saving tools. Prefer these over raw file reads/searches: \
-read_slim (file read, comments/blanks stripped, capped), grep_slim (compact search), \
+read_slim (file read; defaults to a structure outline for large code files, \
+then fetch bodies with offset/limit), grep_slim (compact search, supports exclude globs), \
 dir_map (compact tree), json_slim (prune/minify JSON), text_slim (compress text), \
 token_count (estimate tokens)."
     })

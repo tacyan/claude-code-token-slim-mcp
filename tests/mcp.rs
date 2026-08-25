@@ -1,7 +1,23 @@
 //! End-to-end test: spawn the real binary and speak MCP over stdio.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+fn tmp_dir(name: &str) -> PathBuf {
+    let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn call(name: &str, args: serde_json::Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": 99, "method": "tools/call",
+        "params": {"name": name, "arguments": args}
+    })
+    .to_string()
+}
 
 #[test]
 fn handshake_list_and_call() {
@@ -79,6 +95,119 @@ fn handshake_list_and_call() {
     send(r#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#);
     let r = recv();
     assert_eq!(r["id"], 8);
+
+    // json_slim on a JSONC file (bun.lock / tsconfig.json style)
+    let dir = tmp_dir("jsonc");
+    let lock = dir.join("bun.lock");
+    std::fs::write(
+        &lock,
+        "{\n  // lockfile\n  \"lockfileVersion\": 1,\n  \"packages\": {\n    \"a\": [\"a@1.0.0\", {}, \"sha\"], /* inline */\n  },\n}\n",
+    )
+    .unwrap();
+    send(&call("json_slim", serde_json::json!({"path": lock.to_str().unwrap()})));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(r["result"]["isError"].is_null(), "jsonc must parse: {text}");
+    assert!(text.contains("jsonc"), "got: {text}");
+    assert!(text.contains("lockfileVersion"), "got: {text}");
+
+    // genuinely broken JSON still reports an error
+    send(&call("json_slim", serde_json::json!({"json": "{\"a\": }"})));
+    let r = recv();
+    assert_eq!(r["result"]["isError"], true);
+
+    // grep_slim exclude globs
+    let dir = tmp_dir("grep");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("test")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "fn computeFrameComp() {}\n").unwrap();
+    std::fs::write(dir.join("test/lib_test.rs"), "computeFrameComp();\ncomputeFrameComp();\n").unwrap();
+    let root = dir.to_str().unwrap();
+
+    send(&call("grep_slim", serde_json::json!({"pattern": "computeFrameComp", "path": root})));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("3 matches"), "got: {text}");
+
+    send(&call("grep_slim", serde_json::json!({
+        "pattern": "computeFrameComp", "path": root, "exclude": ["**/test/**"]
+    })));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("1 matches"), "got: {text}");
+    assert!(!text.contains("lib_test.rs"), "got: {text}");
+
+    // exclude_tests shorthand reaches the same result
+    send(&call("grep_slim", serde_json::json!({
+        "pattern": "computeFrameComp", "path": root, "exclude_tests": true
+    })));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("1 matches"), "got: {text}");
+
+    // include filter
+    send(&call("grep_slim", serde_json::json!({
+        "pattern": "computeFrameComp", "path": root, "include": ["src/**"]
+    })));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("1 matches"), "got: {text}");
+
+    // read_slim default mode: outline for a large code file, slim for a small one
+    let dir = tmp_dir("read");
+    let big = dir.join("big.rs");
+    let body: String = (0..40)
+        .map(|i| {
+            let mut f = format!("pub fn f{i}(x: u32) -> u32 {{\n");
+            for k in 0..12 {
+                f.push_str(&format!("    let v{k} = x + {i} + {k} * 3;\n"));
+            }
+            f.push_str("    y * 2\n}\n");
+            f
+        })
+        .collect();
+    std::fs::write(&big, &body).unwrap();
+    send(&call("read_slim", serde_json::json!({"path": big.to_str().unwrap()})));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("mode=outline(auto)"), "got: {text}");
+    assert!(text.contains("offset/limit"), "outline must say how to drill down");
+    assert!(text.contains("L1: pub fn f0"), "got: {text}");
+    assert!(!text.contains("y * 2"), "outline must not carry bodies");
+
+    // offset/limit always reads the range, never an outline
+    send(&call("read_slim", serde_json::json!({
+        "path": big.to_str().unwrap(), "offset": 1, "limit": 15
+    })));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("mode=slim(auto)"), "got: {text}");
+    assert!(text.contains("y * 2"), "got: {text}");
+
+    let small = dir.join("small.rs");
+    std::fs::write(&small, "// c\npub fn a() -> u8 { 1 }\n").unwrap();
+    send(&call("read_slim", serde_json::json!({"path": small.to_str().unwrap()})));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("mode=slim(auto)"), "got: {text}");
+    assert!(text.contains("pub fn a() -> u8 { 1 }"), "got: {text}");
+
+    // a body that would be snipped mid-file yields the outline instead
+    send(&call("read_slim", serde_json::json!({
+        "path": big.to_str().unwrap(), "max_tokens": 200
+    })));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("mode=outline(auto)"), "got: {text}");
+
+    // explicit mode still wins
+    send(&call("read_slim", serde_json::json!({
+        "path": big.to_str().unwrap(), "mode": "slim"
+    })));
+    let r = recv();
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("mode=slim "), "got: {text}");
+    assert!(text.contains("y * 2"), "got: {text}");
 
     drop(stdin);
     let status = child.wait().unwrap();

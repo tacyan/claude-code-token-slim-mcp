@@ -1,5 +1,6 @@
 //! Tool definitions and handlers.
 
+use crate::glob::any_match;
 use crate::slim;
 use crate::tokens::{estimate_tokens, saved_pct, truncate_tokens};
 use regex::RegexBuilder;
@@ -22,6 +23,14 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn env_str(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
 fn s_arg(a: &Value, k: &str) -> Option<String> {
     a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
@@ -31,21 +40,46 @@ fn u_arg(a: &Value, k: &str) -> Option<usize> {
 fn b_arg(a: &Value, k: &str) -> Option<bool> {
     a.get(k).and_then(|v| v.as_bool())
 }
+/// Accept either ["a","b"] or "a,b" for list-valued arguments.
+fn list_arg(a: &Value, k: &str) -> Vec<String> {
+    match a.get(k) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Some(Value::String(s)) => s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Common test/spec/fixture layouts, expanded by `exclude_tests: true`.
+const TEST_GLOBS: &[&str] = &[
+    "**/test/**", "**/tests/**", "**/__tests__/**", "**/spec/**", "**/specs/**",
+    "**/testdata/**", "**/fixtures/**", "**/__mocks__/**", "**/e2e/**",
+    "*_test.*", "*_tests.*", "test_*.*", "*.test.*", "*.spec.*", "*Test.java",
+    "*Tests.cs", "conftest.py",
+];
 
 pub fn tool_definitions() -> Value {
     json!([
         {
             "name": "read_slim",
-            "description": "Read a file with token-slimming. mode=slim (default) strips comments and collapses blank lines; mode=outline returns only function/class/heading signatures with line numbers; mode=raw returns text as-is. Output is capped at max_tokens (head+tail kept, middle snipped). Use this INSTEAD of a plain file read to save tokens.",
+            "description": "Read a file with token-slimming. mode=auto (DEFAULT) returns a structure outline (function/class/heading signatures + line numbers, ~-95%) for large code files and falls back to slim for small or unstructured files — read the outline first, then fetch the parts you need with offset/limit. mode=slim strips comments and collapses blank lines; mode=outline forces the outline; mode=raw returns text as-is. Passing offset/limit always reads that range (never outlined). Output is capped at max_tokens (head+tail kept, middle snipped). Use this INSTEAD of a plain file read to save tokens.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path (absolute, or relative to server cwd)"},
-                    "mode": {"type": "string", "enum": ["slim", "outline", "raw"], "description": "Default: slim"},
+                    "mode": {"type": "string", "enum": ["auto", "slim", "outline", "raw"], "description": "Default: auto (outline for large code files, slim otherwise; env TOKEN_SLIM_DEFAULT_MODE overrides)"},
                     "max_tokens": {"type": "integer", "description": "Output token cap (default: env TOKEN_SLIM_MAX_TOKENS or 4000)"},
                     "offset": {"type": "integer", "description": "1-based start line"},
                     "limit": {"type": "integer", "description": "Number of lines from offset"},
-                    "strip_comments": {"type": "boolean", "description": "mode=slim only. Default true"}
+                    "strip_comments": {"type": "boolean", "description": "slim/auto only. Default true"}
                 },
                 "required": ["path"]
             },
@@ -53,7 +87,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "grep_slim",
-            "description": "Regex search over a directory tree with minimal output: 'path:line:matched-line' only, capped result count, binary/vendor dirs skipped. Use this INSTEAD of a plain grep/search to save tokens.",
+            "description": "Regex search over a directory tree with minimal output: 'path:line:matched-line' only, capped result count, binary/vendor dirs skipped. Use exclude globs (or exclude_tests) to drop test/fixture noise — usually the single biggest saving on a structural query. Use this INSTEAD of a plain grep/search to save tokens.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -62,7 +96,10 @@ pub fn tool_definitions() -> Value {
                     "ext": {"type": "string", "description": "Comma-separated extension filter, e.g. 'rs,toml'"},
                     "max_results": {"type": "integer", "description": "Default: env TOKEN_SLIM_GREP_MAX_RESULTS or 50"},
                     "ignore_case": {"type": "boolean", "description": "Default false"},
-                    "literal": {"type": "boolean", "description": "Treat pattern as literal text. Default false"}
+                    "literal": {"type": "boolean", "description": "Treat pattern as literal text. Default false"},
+                    "exclude": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to skip, e.g. [\"**/test/**\", \"*.spec.ts\"]. Supports * ? and **; a slash-free pattern matches any path segment, and a multi-segment pattern may also match deeper in the tree (tests/** also excludes crates/x/tests/). A comma-separated string is accepted too"},
+                    "exclude_tests": {"type": "boolean", "description": "Shorthand for the usual test/spec/fixture globs (test/, tests/, __tests__/, spec/, testdata/, fixtures/, *_test.*, *.spec.*, ...). Default false"},
+                    "include": {"type": "array", "items": {"type": "string"}, "description": "If set, only paths matching one of these globs are searched (applied before exclude)"}
                 },
                 "required": ["pattern"]
             },
@@ -83,12 +120,12 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "json_slim",
-            "description": "Minify and prune JSON (from text or file): depth limit, arrays sampled to first N items, long strings truncated. Ideal for large API responses / package-lock style files.",
+            "description": "Minify and prune JSON/JSONC (from text or file): depth limit, arrays sampled to first N items, long strings truncated. JSONC input (// and /* */ comments, trailing commas — bun.lock, tsconfig.json, .vscode/*.json) is normalized automatically. Ideal for large API responses / lockfile-style files.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "json": {"type": "string", "description": "Inline JSON text (use this OR path)"},
-                    "path": {"type": "string", "description": "Path to a JSON file (use this OR json)"},
+                    "json": {"type": "string", "description": "Inline JSON/JSONC text (use this OR path)"},
+                    "path": {"type": "string", "description": "Path to a JSON/JSONC file (use this OR json)"},
                     "max_depth": {"type": "integer", "description": "Default: env TOKEN_SLIM_JSON_MAX_DEPTH or 6"},
                     "max_array": {"type": "integer", "description": "Items kept per array. Default: env TOKEN_SLIM_JSON_MAX_ARRAY or 20"},
                     "max_string": {"type": "integer", "description": "Chars kept per string. Default: env TOKEN_SLIM_JSON_MAX_STRING or 200"}
@@ -170,8 +207,9 @@ fn read_slim(a: &Value) -> Result<String, String> {
     let text = read_text_file(&path)?;
     let orig_tok = estimate_tokens(&text);
     let total_lines = text.lines().count();
+    let ranged = a.get("offset").is_some() || a.get("limit").is_some();
 
-    let mut work: String = if a.get("offset").is_some() || a.get("limit").is_some() {
+    let base: String = if ranged {
         let off = u_arg(a, "offset").unwrap_or(1).max(1);
         let lim = u_arg(a, "limit").unwrap_or(usize::MAX);
         text.lines()
@@ -183,28 +221,68 @@ fn read_slim(a: &Value) -> Result<String, String> {
         text.clone()
     };
 
-    let mode = s_arg(a, "mode").unwrap_or_else(|| "slim".into());
     let ext = ext_of(&path);
-    work = match mode.as_str() {
-        "outline" => slim::outline(&work, &ext),
-        "raw" => work,
-        _ => {
-            let mut t = work;
-            if b_arg(a, "strip_comments").unwrap_or(true) {
-                t = slim::strip_comments(&t, &ext);
-            }
-            slim::collapse_blank(&t)
-        }
+    let strip = b_arg(a, "strip_comments").unwrap_or(true);
+    let slimmed = || {
+        let t = if strip {
+            slim::strip_comments(&base, &ext)
+        } else {
+            base.clone()
+        };
+        slim::collapse_blank(&t)
     };
 
     let cap = u_arg(a, "max_tokens").unwrap_or_else(|| env_usize("TOKEN_SLIM_MAX_TOKENS", 4000));
+    let requested = s_arg(a, "mode")
+        .unwrap_or_else(|| env_str("TOKEN_SLIM_DEFAULT_MODE", "auto"))
+        .to_lowercase();
+    let (mode_label, work) = match requested.as_str() {
+        "raw" => ("raw".to_string(), base.clone()),
+        "outline" => ("outline".to_string(), slim::outline(&base, &ext)),
+        "slim" => ("slim".to_string(), slimmed()),
+        _ => resolve_auto(&base, &ext, ranged, slimmed(), cap),
+    };
+
     let (final_text, truncated) = truncate_tokens(&work, cap);
     let new_tok = estimate_tokens(&final_text);
+    let hint = if mode_label.starts_with("outline") {
+        " — structure only, no bodies: fetch a function with offset/limit, or the whole file with mode=slim"
+    } else {
+        ""
+    };
     Ok(format!(
-        "[token-slim] {path} mode={mode} lines={total_lines} ~{orig_tok}→~{new_tok} tok ({}){}\n{final_text}",
+        "[token-slim] {path} mode={mode_label} lines={total_lines} ~{orig_tok}→~{new_tok} tok ({}){}{hint}\n{final_text}",
         saved_pct(orig_tok, new_tok),
         if truncated { " [capped]" } else { "" }
     ))
+}
+
+/// mode=auto: prefer the outline for large, structured files; otherwise
+/// return the slimmed body. A requested line range is never outlined —
+/// that call is already the drill-down step.
+///
+/// The outline wins when it is smaller than the body AND either the body
+/// would be capped anyway (a snipped middle loses more than an outline
+/// does) or the file is big enough that the outline at least halves it.
+fn resolve_auto(
+    base: &str,
+    ext: &str,
+    ranged: bool,
+    slim_text: String,
+    cap: usize,
+) -> (String, String) {
+    if ranged {
+        return ("slim(auto)".to_string(), slim_text);
+    }
+    let slim_tok = estimate_tokens(&slim_text);
+    let min_tok = env_usize("TOKEN_SLIM_AUTO_OUTLINE_MIN_TOKENS", 400);
+    if let Some(o) = slim::outline_opt(base, ext) {
+        let o_tok = estimate_tokens(&o);
+        if o_tok < slim_tok && (slim_tok > cap || (slim_tok > min_tok && o_tok * 2 <= slim_tok)) {
+            return ("outline(auto)".to_string(), o);
+        }
+    }
+    ("slim(auto)".to_string(), slim_text)
 }
 
 fn text_slim(a: &Value) -> Result<String, String> {
@@ -233,7 +311,26 @@ fn json_slim(a: &Value) -> Result<String, String> {
         (None, None) => return Err("provide either 'json' or 'path'".into()),
     };
     let orig_tok = estimate_tokens(&text);
-    let v: Value = serde_json::from_str(&text).map_err(|e| format!("invalid JSON: {e}"))?;
+    // Strict JSON first; on failure retry as JSONC (comments + trailing
+    // commas), which covers bun.lock / tsconfig.json / .vscode/*.json.
+    let (v, jsonc): (Value, bool) = match serde_json::from_str(&text) {
+        Ok(v) => (v, false),
+        Err(strict_err) => {
+            let relaxed = slim::strip_jsonc(&text);
+            match serde_json::from_str(&relaxed) {
+                Ok(v) => (v, true),
+                Err(jsonc_err) => {
+                    let se = strict_err.to_string();
+                    let je = jsonc_err.to_string();
+                    return Err(if se == je {
+                        format!("invalid JSON: {se}")
+                    } else {
+                        format!("invalid JSON: {se} (also unparsable as JSONC: {je})")
+                    });
+                }
+            }
+        }
+    };
     let opts = slim::JsonOpts {
         max_depth: u_arg(a, "max_depth").unwrap_or_else(|| env_usize("TOKEN_SLIM_JSON_MAX_DEPTH", 6)),
         max_array: u_arg(a, "max_array").unwrap_or_else(|| env_usize("TOKEN_SLIM_JSON_MAX_ARRAY", 20)),
@@ -243,7 +340,8 @@ fn json_slim(a: &Value) -> Result<String, String> {
     let out = serde_json::to_string(&pruned).map_err(|e| e.to_string())?;
     let new_tok = estimate_tokens(&out);
     Ok(format!(
-        "[token-slim] json depth≤{} array≤{} string≤{} ~{orig_tok}→~{new_tok} tok ({})\n{out}",
+        "[token-slim] json{} depth≤{} array≤{} string≤{} ~{orig_tok}→~{new_tok} tok ({})\n{out}",
+        if jsonc { "c (comments/trailing commas stripped)" } else { "" },
         opts.max_depth,
         opts.max_array,
         opts.max_string,
@@ -271,11 +369,21 @@ fn should_skip_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name) || (name.starts_with('.') && name != "." && name != "..")
 }
 
-fn collect_files(root: &Path, files: &mut Vec<PathBuf>) {
+/// Path of `p` relative to `root`, `/`-separated, for glob matching.
+fn rel_path(root: &Path, p: &Path) -> String {
+    let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().to_string();
+    if rel.is_empty() {
+        p.to_string_lossy().to_string()
+    } else {
+        rel
+    }
+}
+
+fn collect_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>, exclude: &[String]) {
     if files.len() >= MAX_FILES_SCANNED {
         return;
     }
-    let entries = match fs::read_dir(root) {
+    let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -291,7 +399,8 @@ fn collect_files(root: &Path, files: &mut Vec<PathBuf>) {
             continue;
         }
         if ft.is_dir() {
-            if !should_skip_dir(&name) {
+            // Prune excluded directories instead of walking them.
+            if !should_skip_dir(&name) && !any_match(exclude, &rel_path(root, &p)) {
                 dirs.push(p);
             }
         } else if ft.is_file() {
@@ -303,7 +412,7 @@ fn collect_files(root: &Path, files: &mut Vec<PathBuf>) {
     }
     dirs.sort();
     for d in dirs {
-        collect_files(&d, files);
+        collect_files(root, &d, files, exclude);
     }
 }
 
@@ -320,6 +429,11 @@ fn grep_slim(a: &Value) -> Result<String, String> {
             .filter(|x| !x.is_empty())
             .collect()
     });
+    let include = list_arg(a, "include");
+    let mut exclude = list_arg(a, "exclude");
+    if b_arg(a, "exclude_tests").unwrap_or(false) {
+        exclude.extend(TEST_GLOBS.iter().map(|g| g.to_string()));
+    }
 
     let pat = if literal { regex::escape(&pattern) } else { pattern.clone() };
     let re = RegexBuilder::new(&pat)
@@ -332,13 +446,14 @@ fn grep_slim(a: &Value) -> Result<String, String> {
     if root_path.is_file() {
         files.push(root_path.to_path_buf());
     } else if root_path.is_dir() {
-        collect_files(root_path, &mut files);
+        collect_files(root_path, root_path, &mut files, &exclude);
     } else {
         return Err(format!("no such path: {root}"));
     }
 
     let mut results: Vec<String> = Vec::new();
     let mut scanned = 0usize;
+    let mut skipped = 0usize;
     let mut capped = false;
     'outer: for file in &files {
         if let Some(ref want) = exts {
@@ -350,6 +465,15 @@ fn grep_slim(a: &Value) -> Result<String, String> {
             if !want.contains(&e) {
                 continue;
             }
+        }
+        let rel = rel_path(root_path, file);
+        if !include.is_empty() && !any_match(&include, &rel) {
+            skipped += 1;
+            continue;
+        }
+        if any_match(&exclude, &rel) {
+            skipped += 1;
+            continue;
         }
         let meta = match fs::metadata(file) {
             Ok(m) => m,
@@ -367,12 +491,6 @@ fn grep_slim(a: &Value) -> Result<String, String> {
         }
         scanned += 1;
         let content = String::from_utf8_lossy(&raw);
-        let rel = file
-            .strip_prefix(root_path)
-            .unwrap_or(file)
-            .to_string_lossy()
-            .to_string();
-        let rel = if rel.is_empty() { file.to_string_lossy().to_string() } else { rel };
         for (ln, line) in content.lines().enumerate() {
             if re.is_match(line) {
                 let mut disp = line.trim().to_string();
@@ -388,11 +506,35 @@ fn grep_slim(a: &Value) -> Result<String, String> {
         }
     }
 
+    // Excluded directories are pruned during the walk, so `skipped` counts
+    // only file-level filtering — name the active filters as well, so an
+    // empty result is never mistaken for "nothing matches anywhere".
+    let mut filters: Vec<String> = Vec::new();
+    if !include.is_empty() {
+        filters.push(format!("include={}", include.join(",")));
+    }
+    if !exclude.is_empty() {
+        let shown: Vec<&str> = exclude.iter().take(3).map(|s| s.as_str()).collect();
+        let more = exclude.len().saturating_sub(shown.len());
+        filters.push(format!(
+            "exclude={}{}",
+            shown.join(","),
+            if more > 0 { format!(",+{more}") } else { String::new() }
+        ));
+    }
+    if skipped > 0 {
+        filters.push(format!("{skipped} files skipped"));
+    }
+    let filtered = if filters.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", filters.join(", "))
+    };
     let header = format!(
-        "[token-slim] grep /{pattern}/ in {root}: {} matches, {scanned} files scanned{}",
+        "[token-slim] grep /{pattern}/ in {root}: {} matches, {scanned} files scanned{filtered}{}",
         results.len(),
         if capped {
-            format!(" [capped at {max_results} — narrow the pattern or add ext filter]")
+            format!(" [capped at {max_results} — narrow the pattern, add ext filter or exclude globs]")
         } else {
             String::new()
         }
