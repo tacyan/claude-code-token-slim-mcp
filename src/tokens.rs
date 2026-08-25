@@ -92,7 +92,10 @@ mod tests {
     #[test]
     fn cjk_estimate() {
         // 10 CJK chars -> ~10 tokens
-        let s = "日本語のテキストです。".chars().take(10).collect::<String>();
+        let s = "日本語のテキストです。"
+            .chars()
+            .take(10)
+            .collect::<String>();
         assert_eq!(estimate_tokens(&s), 10);
     }
 

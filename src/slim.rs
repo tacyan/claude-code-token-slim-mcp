@@ -164,9 +164,9 @@ pub fn dedupe_lines(src: &str) -> String {
             out.push(lines[i].to_string());
             out.push(format!("… (same line ×{run})"));
         } else {
-            for k in i..j {
-                out.push(lines[k].to_string());
-            }
+            // Every line in i..j is identical by construction, so the run is
+            // copied through verbatim when it is too short to be worth a marker.
+            out.extend(lines[i..j].iter().map(|l| (*l).to_string()));
         }
         i = j;
     }
