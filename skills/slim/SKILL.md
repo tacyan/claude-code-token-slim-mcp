@@ -17,7 +17,7 @@ re-read this skill if you lose them.
 1. **MCP tools available** (`mcp__token-slim__*` visible, possibly deferred):
    load ALL of them in ONE ToolSearch call, then use them for everything below.
 
-   ToolSearch query: `select:mcp__token-slim__read_slim,mcp__token-slim__grep_slim,mcp__token-slim__dir_map,mcp__token-slim__json_slim,mcp__token-slim__text_slim,mcp__token-slim__token_count`
+   ToolSearch query: `select:mcp__token-slim__read_slim,mcp__token-slim__grep_slim,mcp__token-slim__refs_slim,mcp__token-slim__dir_map,mcp__token-slim__json_slim,mcp__token-slim__text_slim,mcp__token-slim__token_count`
 
 2. **MCP not connected** — call the binary directly via Bash using the helper
    shipped with this skill (identical behavior, works from any cwd):

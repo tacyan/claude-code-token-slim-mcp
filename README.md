@@ -14,9 +14,10 @@ LLM のトークン消費の大半は「ファイルの中身・検索結果・A
 
 | ツール | 代替対象 | 削減内容 | 削減目安 |
 |---|---|---|---|
-| `read_slim` (既定 mode=auto) | ファイル全読み | 大きなコードファイルは**アウトライン**(関数/クラス/見出し+行番号)、小さい・非構造ファイルは slim 本文 | **90%以上** / 10〜60% |
+| `read_slim` (既定 mode=auto) | ファイル全読み | 大きなコードファイルは**アウトライン**(関数/**クラスメソッド**/見出し+行番号)、小さい・非構造ファイルは slim 本文 | **90%以上** / 10〜60% |
 | `read_slim` (mode=slim) | 通常の Read/cat | コメント・空行除去+トークン上限キャップ(先頭+末尾保持) | 10〜60% |
 | `grep_slim` | grep / 検索ツール | `path:行番号:一致行` のみ・件数上限・vendor/バイナリ除外・**glob 除外**(`exclude` / `exclude_tests`) | 大 |
+| `refs_slim` | grep で「呼び出し元」を探す | シンボルの参照を**定義/呼び出し/テスト/import/コメント/言及に分類**し、実際の呼び出しだけを「それを含む関数名」付きで返す。`depth=2` で変更の影響範囲 | **10〜90%** |
 | `dir_map` | ls -R / find | 1行1エントリの省トークンツリー(深さ・件数上限) | 大 |
 | `json_slim` | JSON 全貼り | minify+深さ制限+配列サンプリング+長文字列切詰め。**JSONC 対応**(コメント・末尾カンマ) | 50〜99% |
 | `text_slim` | ログ全貼り | 空行・空白圧縮、重複行の集約 | 内容次第 |
@@ -153,7 +154,8 @@ MCP ツールは「登録しただけ」では標準の Read/Grep より優先�
 
 ```
 ファイル読み取り・コード検索・ディレクトリ確認には token-slim MCP の
-read_slim / grep_slim / dir_map を優先して使うこと。
+read_slim / grep_slim / refs_slim / dir_map を優先して使うこと。
+「この関数を誰が呼んでいるか」「この変更の影響範囲は」は grep ではなく refs_slim で調べること。
 大きな JSON は json_slim、長いログは text_slim を通してから引用すること。
 ```
 
@@ -233,6 +235,50 @@ JSONC 経路を通った場合はヘッダーに `jsonc (comments/trailing comma
 ```jsonc
 { "text": "長いログ...", "level": "normal" }  // normal | aggressive
 ```
+
+### refs_slim
+
+「この関数を誰が呼んでいるか」に答えます。grep はこれに答えられません — 宣言・import・テスト・実際の呼び出しを区別できないからです。
+
+```json
+{"symbol": "computeFrameComp", "path": "packages", "ext": "ts"}
+```
+
+```
+[token-slim] refs computeFrameComp in packages: definition 1, call 2, test-call 17, import 2, comment 5, mention 9; 62 files scanned
+def  renderer-webgpu/src/look-math.ts:82: export function computeFrameComp(input: FrameCompInput): FrameComp {
+call renderer-webgl/src/renderer.ts:505  in frame: const { fadeAlpha, ... } = computeFrameComp({
+call renderer-webgpu/src/renderer.ts:697  in frame: const { fadeAlpha, ... } = computeFrameComp({
+```
+
+同じ問いに対する出力量(実測、TypeScript 62 ファイル):
+
+| 手法 | 出力量 | 答え |
+|---|---:|---|
+| 素の `grep -rn` | 4,237 B | 36 行(うち 34 行はノイズ) |
+| `grep_slim` | 3,881 B | 同じ 36 行 |
+| **`refs_slim`** | **482 B** | **定義 1 + 呼び出し 2、正解と一致** |
+
+各呼び出しは**それを含む関数名**に紐付きます(`in frame`)。ブレース深度を追跡するため、既に閉じた内側のアロー関数が後続の行を横取りしません。
+
+`depth: 2` を渡すと、その関数群の呼び出し元まで辿ります — 変更の影響範囲です。
+
+```
+hop2 buildRenderPipeline -> gpuBlendState  (renderer-webgpu/src/renderer.ts:315)
+hop2 frame -> syncLookModes  (renderer-webgpu/src/renderer.ts:642)
+```
+
+索引を持たないので**常に最新**です。1 秒前に書いた関数もそのまま見えます。
+
+| 引数 | 既定 | 説明 |
+|---|---|---|
+| `symbol` | (必須) | 追跡する識別子 |
+| `path` | `.` | 探索ルート |
+| `ext` | — | 拡張子フィルタ(`ts,tsx`) |
+| `depth` | 1 | 2 で推移的な呼び出し元まで |
+| `include_tests` | false | テスト内の呼び出しも一覧に出す(既定は件数のみ) |
+| `max_results` | 50 | 一覧の上限 |
+| `exclude` / `include` | — | glob(`grep_slim` と同じ構文) |
 
 ### token_count
 ```jsonc
