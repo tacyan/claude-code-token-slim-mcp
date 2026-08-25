@@ -51,7 +51,7 @@ to fan out; do respect normal gates (commit/push/publish/destructive ops).
 4. **Slim footer** — append to EVERY sub-agent prompt:
 
    > Context discipline: prefer token-slim tools (ToolSearch
-   > "select:mcp__token-slim__read_slim,mcp__token-slim__grep_slim,mcp__token-slim__dir_map",
+   > "select:mcp__token-slim__read_slim,mcp__token-slim__grep_slim,mcp__token-slim__refs_slim,mcp__token-slim__dir_map",
    > then read_slim/grep_slim/dir_map instead of Read/Grep/ls; outline mode
    > first on big files). If unavailable, cap Bash output with `| head -50`.
    > Final message = conclusions only (findings, diffs applied, file:line

@@ -1,6 +1,7 @@
 //! Tool definitions and handlers.
 
 use crate::glob::any_match;
+use crate::refs::{self, RefKind, SymbolPatterns};
 use crate::slim;
 use crate::tokens::{estimate_tokens, saved_pct, truncate_tokens};
 use regex::RegexBuilder;
@@ -9,9 +10,27 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const SKIP_DIRS: &[&str] = &[
-    ".git", ".hg", ".svn", "node_modules", "target", "dist", "build", "out",
-    ".next", ".nuxt", ".venv", "venv", "__pycache__", "vendor", ".idea",
-    ".vscode", ".cache", "coverage", ".terraform", "Pods", "DerivedData",
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "vendor",
+    ".idea",
+    ".vscode",
+    ".cache",
+    "coverage",
+    ".terraform",
+    "Pods",
+    "DerivedData",
 ];
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_FILES_SCANNED: usize = 20_000;
@@ -32,15 +51,19 @@ fn env_str(key: &str, default: &str) -> String {
 }
 
 fn s_arg(a: &Value, k: &str) -> Option<String> {
-    a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string())
+    a.get(k)
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string)
 }
 fn u_arg(a: &Value, k: &str) -> Option<usize> {
-    a.get(k).and_then(|v| v.as_u64()).map(|v| v as usize)
+    a.get(k)
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as usize)
 }
 fn b_arg(a: &Value, k: &str) -> Option<bool> {
-    a.get(k).and_then(|v| v.as_bool())
+    a.get(k).and_then(serde_json::Value::as_bool)
 }
-/// Accept either ["a","b"] or "a,b" for list-valued arguments.
+/// Accept either `["a","b"]` or `"a,b"` for list-valued arguments.
 fn list_arg(a: &Value, k: &str) -> Vec<String> {
     match a.get(k) {
         Some(Value::Array(items)) => items
@@ -60,10 +83,23 @@ fn list_arg(a: &Value, k: &str) -> Vec<String> {
 
 /// Common test/spec/fixture layouts, expanded by `exclude_tests: true`.
 const TEST_GLOBS: &[&str] = &[
-    "**/test/**", "**/tests/**", "**/__tests__/**", "**/spec/**", "**/specs/**",
-    "**/testdata/**", "**/fixtures/**", "**/__mocks__/**", "**/e2e/**",
-    "*_test.*", "*_tests.*", "test_*.*", "*.test.*", "*.spec.*", "*Test.java",
-    "*Tests.cs", "conftest.py",
+    "**/test/**",
+    "**/tests/**",
+    "**/__tests__/**",
+    "**/spec/**",
+    "**/specs/**",
+    "**/testdata/**",
+    "**/fixtures/**",
+    "**/__mocks__/**",
+    "**/e2e/**",
+    "*_test.*",
+    "*_tests.*",
+    "test_*.*",
+    "*.test.*",
+    "*.spec.*",
+    "*Test.java",
+    "*Tests.cs",
+    "conftest.py",
 ];
 
 pub fn tool_definitions() -> Value {
@@ -102,6 +138,25 @@ pub fn tool_definitions() -> Value {
                     "include": {"type": "array", "items": {"type": "string"}, "description": "If set, only paths matching one of these globs are searched (applied before exclude)"}
                 },
                 "required": ["pattern"]
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false}
+        },
+        {
+            "name": "refs_slim",
+            "description": "Find every reference to a symbol and CLASSIFY it: definition, call, test-call, import, comment, or bare mention. Answers 'who calls this?' — which a plain grep cannot, because it cannot tell a call from the declaration, an import, or a test. Reports counts for every class and lists only the definition and the real call sites, each attributed to the function that contains it. depth=2 also reports the callers of those functions (the blast radius of a change). No index, so it never goes stale.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Identifier to trace, e.g. 'computeFrameComp'"},
+                    "path": {"type": "string", "description": "Root dir or single file. Default: cwd"},
+                    "ext": {"type": "string", "description": "Comma-separated extension filter, e.g. 'ts,tsx'"},
+                    "depth": {"type": "integer", "description": "1 = direct callers (default). 2 = also the callers of those, for a change's blast radius"},
+                    "max_results": {"type": "integer", "description": "Cap on listed call sites. Default: env TOKEN_SLIM_GREP_MAX_RESULTS or 50"},
+                    "include_tests": {"type": "boolean", "description": "List test call sites too instead of only counting them. Default false"},
+                    "exclude": {"type": "array", "items": {"type": "string"}, "description": "Glob patterns to skip (same syntax as grep_slim)"},
+                    "include": {"type": "array", "items": {"type": "string"}, "description": "If set, only paths matching one of these globs are searched"}
+                },
+                "required": ["symbol"]
             },
             "annotations": {"readOnlyHint": true, "openWorldHint": false}
         },
@@ -171,6 +226,7 @@ pub fn call(params: &Value) -> Result<Value, (i64, String)> {
     let handled = match name {
         "read_slim" => read_slim(&args),
         "grep_slim" => grep_slim(&args),
+        "refs_slim" => refs_slim(&args),
         "dir_map" => dir_map(&args),
         "json_slim" => json_slim(&args),
         "text_slim" => text_slim(&args),
@@ -179,7 +235,9 @@ pub fn call(params: &Value) -> Result<Value, (i64, String)> {
     };
     Ok(match handled {
         Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
-        Err(e) => json!({"content": [{"type": "text", "text": format!("error: {e}")}], "isError": true}),
+        Err(e) => {
+            json!({"content": [{"type": "text", "text": format!("error: {e}")}], "isError": true})
+        }
     })
 }
 
@@ -332,16 +390,23 @@ fn json_slim(a: &Value) -> Result<String, String> {
         }
     };
     let opts = slim::JsonOpts {
-        max_depth: u_arg(a, "max_depth").unwrap_or_else(|| env_usize("TOKEN_SLIM_JSON_MAX_DEPTH", 6)),
-        max_array: u_arg(a, "max_array").unwrap_or_else(|| env_usize("TOKEN_SLIM_JSON_MAX_ARRAY", 20)),
-        max_string: u_arg(a, "max_string").unwrap_or_else(|| env_usize("TOKEN_SLIM_JSON_MAX_STRING", 200)),
+        max_depth: u_arg(a, "max_depth")
+            .unwrap_or_else(|| env_usize("TOKEN_SLIM_JSON_MAX_DEPTH", 6)),
+        max_array: u_arg(a, "max_array")
+            .unwrap_or_else(|| env_usize("TOKEN_SLIM_JSON_MAX_ARRAY", 20)),
+        max_string: u_arg(a, "max_string")
+            .unwrap_or_else(|| env_usize("TOKEN_SLIM_JSON_MAX_STRING", 200)),
     };
     let pruned = slim::prune_json(&v, opts.max_depth, &opts);
     let out = serde_json::to_string(&pruned).map_err(|e| e.to_string())?;
     let new_tok = estimate_tokens(&out);
     Ok(format!(
         "[token-slim] json{} depth≤{} array≤{} string≤{} ~{orig_tok}→~{new_tok} tok ({})\n{out}",
-        if jsonc { "c (comments/trailing commas stripped)" } else { "" },
+        if jsonc {
+            "c (comments/trailing commas stripped)"
+        } else {
+            ""
+        },
         opts.max_depth,
         opts.max_array,
         opts.max_string,
@@ -356,7 +421,7 @@ fn token_count(a: &Value) -> Result<String, String> {
         (None, None) => return Err("provide either 'text' or 'path'".into()),
     };
     let chars = text.chars().count();
-    let ascii = text.chars().filter(|c| c.is_ascii()).count();
+    let ascii = text.chars().filter(char::is_ascii).count();
     let lines = text.lines().count();
     Ok(format!(
         "[token-slim] {label}: ≈{} tokens (chars={chars}, ascii={ascii}, non-ascii={}, lines={lines}) heuristic ±20%",
@@ -371,7 +436,11 @@ fn should_skip_dir(name: &str) -> bool {
 
 /// Path of `p` relative to `root`, `/`-separated, for glob matching.
 fn rel_path(root: &Path, p: &Path) -> String {
-    let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().to_string();
+    let rel = p
+        .strip_prefix(root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .to_string();
     if rel.is_empty() {
         p.to_string_lossy().to_string()
     } else {
@@ -383,17 +452,15 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>, exclude: &[S
     if files.len() >= MAX_FILES_SCANNED {
         return;
     }
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
     let mut dirs: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let p = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        let ft = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(ft) = entry.file_type() else {
+            continue;
         };
         if ft.is_symlink() {
             continue;
@@ -432,10 +499,14 @@ fn grep_slim(a: &Value) -> Result<String, String> {
     let include = list_arg(a, "include");
     let mut exclude = list_arg(a, "exclude");
     if b_arg(a, "exclude_tests").unwrap_or(false) {
-        exclude.extend(TEST_GLOBS.iter().map(|g| g.to_string()));
+        exclude.extend(TEST_GLOBS.iter().map(std::string::ToString::to_string));
     }
 
-    let pat = if literal { regex::escape(&pattern) } else { pattern.clone() };
+    let pat = if literal {
+        regex::escape(&pattern)
+    } else {
+        pattern.clone()
+    };
     let re = RegexBuilder::new(&pat)
         .case_insensitive(ignore_case)
         .build()
@@ -475,16 +546,14 @@ fn grep_slim(a: &Value) -> Result<String, String> {
             skipped += 1;
             continue;
         }
-        let meta = match fs::metadata(file) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(meta) = fs::metadata(file) else {
+            continue;
         };
         if meta.len() > MAX_FILE_BYTES {
             continue;
         }
-        let raw = match fs::read(file) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(raw) = fs::read(file) else {
+            continue;
         };
         if raw.iter().take(4096).any(|b| *b == 0) {
             continue;
@@ -514,12 +583,20 @@ fn grep_slim(a: &Value) -> Result<String, String> {
         filters.push(format!("include={}", include.join(",")));
     }
     if !exclude.is_empty() {
-        let shown: Vec<&str> = exclude.iter().take(3).map(|s| s.as_str()).collect();
+        let shown: Vec<&str> = exclude
+            .iter()
+            .take(3)
+            .map(std::string::String::as_str)
+            .collect();
         let more = exclude.len().saturating_sub(shown.len());
         filters.push(format!(
             "exclude={}{}",
             shown.join(","),
-            if more > 0 { format!(",+{more}") } else { String::new() }
+            if more > 0 {
+                format!(",+{more}")
+            } else {
+                String::new()
+            }
         ));
     }
     if skipped > 0 {
@@ -534,7 +611,9 @@ fn grep_slim(a: &Value) -> Result<String, String> {
         "[token-slim] grep /{pattern}/ in {root}: {} matches, {scanned} files scanned{filtered}{}",
         results.len(),
         if capped {
-            format!(" [capped at {max_results} — narrow the pattern, add ext filter or exclude globs]")
+            format!(
+                " [capped at {max_results} — narrow the pattern, add ext filter or exclude globs]"
+            )
         } else {
             String::new()
         }
@@ -583,17 +662,15 @@ fn walk_map(
     if level >= max_depth || *count >= max_entries {
         return;
     }
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
     let mut dirs: Vec<(String, PathBuf)> = Vec::new();
     let mut files: Vec<(String, u64)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let ft = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(ft) = entry.file_type() else {
+            continue;
         };
         if ft.is_symlink() {
             continue;
@@ -626,5 +703,241 @@ fn walk_map(
         }
         lines.push(format!("{indent}{name} {}", human_size(*size)));
         *count += 1;
+    }
+}
+
+/// One file's text, read once and reused across every scan pass so `depth=2`
+/// costs a second classification, not a second walk.
+struct LoadedFile {
+    rel: String,
+    content: String,
+    is_test: bool,
+}
+
+/// A classified reference to the symbol being traced.
+struct Hit {
+    rel: String,
+    line: usize,
+    text: String,
+    kind: RefKind,
+    /// The function/class whose body contains this line, when one does.
+    enclosing: Option<String>,
+}
+
+/// Read every candidate file once. Binary, oversized and filtered files drop
+/// out here, so the scan passes see only text they can classify.
+fn load_files(a: &Value, root_path: &Path) -> Result<Vec<LoadedFile>, String> {
+    let include = list_arg(a, "include");
+    let exclude = list_arg(a, "exclude");
+    let exts: Option<Vec<String>> = s_arg(a, "ext").map(|e| {
+        e.split(',')
+            .map(|x| x.trim().trim_start_matches('.').to_lowercase())
+            .filter(|x| !x.is_empty())
+            .collect()
+    });
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if root_path.is_file() {
+        paths.push(root_path.to_path_buf());
+    } else if root_path.is_dir() {
+        collect_files(root_path, root_path, &mut paths, &exclude);
+    } else {
+        return Err(format!("no such path: {}", root_path.display()));
+    }
+
+    let mut out = Vec::new();
+    for file in paths {
+        if let Some(ref want) = exts {
+            let e = file
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !want.contains(&e) {
+                continue;
+            }
+        }
+        let rel = rel_path(root_path, &file);
+        if !include.is_empty() && !any_match(&include, &rel) {
+            continue;
+        }
+        if any_match(&exclude, &rel) {
+            continue;
+        }
+        match fs::metadata(&file) {
+            Ok(m) if m.len() <= MAX_FILE_BYTES => {}
+            _ => continue,
+        }
+        let Ok(raw) = fs::read(&file) else {
+            continue;
+        };
+        if raw.iter().take(4096).any(|b| *b == 0) {
+            continue;
+        }
+        let is_test = any_match(
+            &TEST_GLOBS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
+            &rel,
+        );
+        out.push(LoadedFile {
+            rel,
+            content: String::from_utf8_lossy(&raw).into_owned(),
+            is_test,
+        });
+    }
+    Ok(out)
+}
+
+/// Classify every mention of `sym` across the loaded files. `resolve_enclosing`
+/// is the expensive half (it re-walks a file to track brace depth), so it runs
+/// only for the hits that will actually be reported or followed.
+fn scan_symbol(
+    files: &[LoadedFile],
+    sym: &str,
+    resolve_enclosing: bool,
+) -> Result<Vec<Hit>, String> {
+    let pats = SymbolPatterns::new(sym)?;
+    let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(sym)))
+        .map_err(|e| format!("bad symbol {sym:?}: {e}"))?;
+    let mut hits = Vec::new();
+    for f in files {
+        if !word.is_match(&f.content) {
+            continue; // whole-file reject: most files never mention the symbol
+        }
+        for (i, line) in f.content.lines().enumerate() {
+            if !word.is_match(line) {
+                continue;
+            }
+            let kind = pats.classify(line, f.is_test);
+            let enclosing =
+                if resolve_enclosing && matches!(kind, RefKind::Call | RefKind::TestCall) {
+                    refs::enclosing_symbol(&f.content, i + 1)
+                } else {
+                    None
+                };
+            let mut text = line.trim().to_string();
+            if text.chars().count() > 160 {
+                text = text.chars().take(160).collect::<String>() + "…";
+            }
+            hits.push(Hit {
+                rel: f.rel.clone(),
+                line: i + 1,
+                text,
+                kind,
+                enclosing,
+            });
+        }
+    }
+    Ok(hits)
+}
+
+fn refs_slim(a: &Value) -> Result<String, String> {
+    let symbol = s_arg(a, "symbol").ok_or("symbol is required")?;
+    let root = s_arg(a, "path").unwrap_or_else(|| ".".into());
+    let depth = u_arg(a, "depth").unwrap_or(1).clamp(1, 2);
+    let include_tests = b_arg(a, "include_tests").unwrap_or(false);
+    let max_results =
+        u_arg(a, "max_results").unwrap_or_else(|| env_usize("TOKEN_SLIM_GREP_MAX_RESULTS", 50));
+
+    let root_path = Path::new(&root);
+    let files = load_files(a, root_path)?;
+    let hits = scan_symbol(&files, &symbol, true)?;
+
+    let mut counts: Vec<(RefKind, usize)> = Vec::new();
+    for k in RefKind::ORDER {
+        let n = hits.iter().filter(|h| h.kind == k).count();
+        if n > 0 {
+            counts.push((k, n));
+        }
+    }
+    let summary = if counts.is_empty() {
+        "no references".to_string()
+    } else {
+        counts
+            .iter()
+            .map(|(k, n)| format!("{} {n}", k.label()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut body: Vec<String> = Vec::new();
+    let mut listed = 0usize;
+    let mut capped = false;
+    for k in [RefKind::Definition, RefKind::Call, RefKind::TestCall] {
+        if k == RefKind::TestCall && !include_tests {
+            continue;
+        }
+        for h in hits.iter().filter(|h| h.kind == k) {
+            if listed >= max_results {
+                capped = true;
+                break;
+            }
+            let tag = match k {
+                RefKind::Definition => "def ",
+                RefKind::Call => "call",
+                _ => "test",
+            };
+            let scope = match &h.enclosing {
+                Some(e) if Some(e.as_str()) != Some(symbol.as_str()) => format!("  in {e}"),
+                _ => String::new(),
+            };
+            body.push(format!("{tag} {}:{}{scope}: {}", h.rel, h.line, h.text));
+            listed += 1;
+        }
+    }
+
+    // depth=2: the callers of the functions that call `symbol` — the set a
+    // change to `symbol` can reach. Names only; the hop-1 lines above already
+    // carry the exact locations.
+    if depth >= 2 {
+        let mut seen: Vec<String> = vec![symbol.clone()];
+        let mut frontier: Vec<String> = hits
+            .iter()
+            .filter(|h| h.kind == RefKind::Call)
+            .filter_map(|h| h.enclosing.clone())
+            .collect();
+        frontier.sort();
+        frontier.dedup();
+        frontier.retain(|f| !seen.contains(f));
+        seen.extend(frontier.iter().cloned());
+
+        let mut hop2: Vec<String> = Vec::new();
+        for caller in &frontier {
+            let inner = scan_symbol(&files, caller, true)?;
+            for h in inner.iter().filter(|h| h.kind == RefKind::Call) {
+                let via = h.enclosing.clone().unwrap_or_else(|| "(top level)".into());
+                if via == *caller {
+                    continue; // recursion, not a new caller
+                }
+                let entry = format!("hop2 {via} -> {caller}  ({}:{})", h.rel, h.line);
+                if !hop2.contains(&entry) {
+                    hop2.push(entry);
+                }
+            }
+        }
+        hop2.sort();
+        if hop2.is_empty() {
+            body.push("hop2 (no further callers)".to_string());
+        } else {
+            body.extend(hop2);
+        }
+    }
+
+    let depth_note = if depth >= 2 { " depth=2" } else { "" };
+    let header = format!(
+        "[token-slim] refs {symbol} in {root}{depth_note}: {summary}; {} files scanned{}",
+        files.len(),
+        if capped {
+            format!(" [listing capped at {max_results}]")
+        } else {
+            String::new()
+        }
+    );
+    if body.is_empty() {
+        Ok(header)
+    } else {
+        Ok(format!("{header}\n{}", body.join("\n")))
     }
 }

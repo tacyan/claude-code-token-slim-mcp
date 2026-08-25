@@ -1,4 +1,4 @@
-//! Minimal glob matcher for path filters (`exclude` in grep_slim).
+//! Minimal glob matcher for path filters (`exclude` in `grep_slim`).
 //! Supports `*` (any chars within one segment), `?` (one char) and `**`
 //! (zero or more path segments). Patterns without a `/` also match a bare
 //! path segment (so `tests` excludes any `tests/` dir, `*.test.ts` any

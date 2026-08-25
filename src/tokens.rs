@@ -27,7 +27,7 @@ pub fn saved_pct(orig: usize, new: usize) -> String {
 }
 
 /// Cap `text` to roughly `max` tokens, keeping head (~70%) and tail (~20%)
-/// with a snip marker in between. Returns (text, was_truncated).
+/// with a snip marker in between. Returns (text, `was_truncated`).
 pub fn truncate_tokens(text: &str, max: usize) -> (String, bool) {
     if estimate_tokens(text) <= max {
         return (text.to_string(), false);
@@ -92,7 +92,10 @@ mod tests {
     #[test]
     fn cjk_estimate() {
         // 10 CJK chars -> ~10 tokens
-        let s = "日本語のテキストです。".chars().take(10).collect::<String>();
+        let s = "日本語のテキストです。"
+            .chars()
+            .take(10)
+            .collect::<String>();
         assert_eq!(estimate_tokens(&s), 10);
     }
 

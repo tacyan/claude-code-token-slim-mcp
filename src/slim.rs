@@ -13,16 +13,17 @@ pub struct CommentStyle {
 
 pub fn comment_style(ext: &str) -> CommentStyle {
     match ext {
-        "rs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "java" | "c" | "h" | "cpp"
-        | "cc" | "hpp" | "go" | "swift" | "kt" | "kts" | "scala" | "cs" | "dart" | "php"
-        | "css" | "scss" | "less" | "proto" | "zig" | "m" | "mm" | "json" | "jsonc"
-        | "json5" => CommentStyle {
-            line: &["//"],
-            block: &[("/*", "*/")],
-        },
-        "py" | "rb" | "sh" | "bash" | "zsh" | "fish" | "yaml" | "yml" | "toml" | "pl"
-        | "r" | "jl" | "ex" | "exs" | "tf" | "nix" | "mk" | "cmake" | "dockerfile"
-        | "gitignore" | "env" => CommentStyle {
+        "rs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "java" | "c" | "h" | "cpp" | "cc"
+        | "hpp" | "go" | "swift" | "kt" | "kts" | "scala" | "cs" | "dart" | "php" | "css"
+        | "scss" | "less" | "proto" | "zig" | "m" | "mm" | "json" | "jsonc" | "json5" => {
+            CommentStyle {
+                line: &["//"],
+                block: &[("/*", "*/")],
+            }
+        }
+        "py" | "rb" | "sh" | "bash" | "zsh" | "fish" | "yaml" | "yml" | "toml" | "pl" | "r"
+        | "jl" | "ex" | "exs" | "tf" | "nix" | "mk" | "cmake" | "dockerfile" | "gitignore"
+        | "env" => CommentStyle {
             line: &["#"],
             block: &[],
         },
@@ -163,9 +164,9 @@ pub fn dedupe_lines(src: &str) -> String {
             out.push(lines[i].to_string());
             out.push(format!("… (same line ×{run})"));
         } else {
-            for k in i..j {
-                out.push(lines[k].to_string());
-            }
+            // Every line in i..j is identical by construction, so the run is
+            // copied through verbatim when it is too short to be worth a marker.
+            out.extend(lines[i..j].iter().map(|l| (*l).to_string()));
         }
         i = j;
     }
@@ -199,6 +200,8 @@ pub fn collapse_inner_spaces(src: &str) -> String {
 
 static SIG_RE: OnceLock<Regex> = OnceLock::new();
 static ARROW_RE: OnceLock<Regex> = OnceLock::new();
+static METHOD_RE: OnceLock<Regex> = OnceLock::new();
+static NOT_METHOD_RE: OnceLock<Regex> = OnceLock::new();
 static MD_RE: OnceLock<Regex> = OnceLock::new();
 
 fn sig_re() -> &'static Regex {
@@ -208,6 +211,62 @@ fn sig_re() -> &'static Regex {
         )
         .unwrap()
     })
+}
+
+/// Class methods carry no leading keyword in TypeScript, JavaScript, Java,
+/// C#, Kotlin and Swift: `frame(dt: number): void {` and
+/// `private syncLookModes(): void {` both look like a bare call to
+/// [`sig_re`], so an outline of a class-heavy file used to come back with
+/// every method missing — the outline of a 849-line renderer listed its
+/// imports and interfaces and not one of its 18 methods. Anchor on the shape
+/// instead: indentation, optional modifiers, an identifier, an argument list,
+/// and either a body brace or a declaration terminator.
+fn method_re() -> &'static Regex {
+    METHOD_RE.get_or_init(|| {
+        // Modifiers that may precede a method name.
+        const MODS: &str = r"(?:(?:pub|public|private|protected|internal|static|async|abstract|override|final|readonly|get|set|open|suspend)\s+)*";
+        // An argument list that tolerates one level of nesting, so a callback
+        // parameter type survives: `onCollide(cb: (o: T) => void)`.
+        const ARGS: &str = r"\((?:[^()]|\([^()]*\))*\)";
+        Regex::new(&format!(
+            concat!(
+                // Body or declaration terminator: `  frame(dt: number): void {{`
+                r"^[ \t]+{mods}(?:\*\s*)?[A-Za-z_$][\w$]*\s*(?:<[^>()]*>)?\s*{args}\s*(?::[^={{;]+)?\s*[{{;]\s*$",
+                // Interface member with a return type and no body:
+                // `  set(text: string): void`
+                r"|^[ \t]+{mods}(?:\*\s*)?[A-Za-z_$][\w$]*\s*(?:<[^>()]*>)?\s*{args}\s*:[^={{;]+;?\s*$",
+                // Argument list that wraps onto the next line: `  static async create(`
+                r"|^[ \t]+{mods}(?:\*\s*)?[A-Za-z_$][\w$]*\s*(?:<[^>()]*>)?\s*\(\s*$",
+            ),
+            mods = MODS,
+            args = ARGS,
+        ))
+        .unwrap()
+    })
+}
+
+/// Control flow and statement shapes that [`method_re`] would otherwise claim:
+/// `if (ok) {`, `for (…) {`, `} catch (e) {`. Checked as a veto so the method
+/// pattern itself can stay readable.
+fn not_method_re() -> &'static Regex {
+    NOT_METHOD_RE.get_or_init(|| {
+        Regex::new(
+            r"^[ \t]*[});\]]*\s*(?:if|for|while|switch|catch|return|else|do|with|await|new|typeof|throw|yield|case|default|delete|void|in|of)\b",
+        )
+        .unwrap()
+    })
+}
+
+/// True when the line declares a function, class, method or arrow binding —
+/// the outline's unit of structure. Shared with `refs_slim`, which resolves a
+/// hit's enclosing symbol from exactly the same set.
+pub fn is_signature(line: &str, is_md: bool) -> bool {
+    if is_md {
+        return md_re().is_match(line);
+    }
+    sig_re().is_match(line)
+        || arrow_re().is_match(line)
+        || (method_re().is_match(line) && !not_method_re().is_match(line))
 }
 
 fn arrow_re() -> &'static Regex {
@@ -229,11 +288,7 @@ pub fn outline_opt(src: &str, ext: &str) -> Option<String> {
     let mut out: Vec<String> = Vec::new();
     let is_md = matches!(ext, "md" | "mdx" | "markdown");
     for (i, line) in src.lines().enumerate() {
-        let hit = if is_md {
-            md_re().is_match(line)
-        } else {
-            sig_re().is_match(line) || arrow_re().is_match(line)
-        };
+        let hit = is_signature(line, is_md);
         if hit {
             let mut disp = line.trim_end().to_string();
             if disp.chars().count() > 160 {
@@ -451,7 +506,8 @@ mod tests {
 
     #[test]
     fn outline_finds_signatures() {
-        let src = "use std;\n\npub fn hello(a: u32) -> u32 {\n  a\n}\nstruct Foo;\nconst X: u8 = 1;\n";
+        let src =
+            "use std;\n\npub fn hello(a: u32) -> u32 {\n  a\n}\nstruct Foo;\nconst X: u8 = 1;\n";
         let out = outline(src, "rs");
         assert!(out.contains("L3: pub fn hello"));
         assert!(out.contains("L6: struct Foo;"));
@@ -509,7 +565,11 @@ mod tests {
             "long": "x".repeat(500),
             "deep": {"a": {"b": {"c": {"d": 1}}}}
         });
-        let o = JsonOpts { max_depth: 3, max_array: 5, max_string: 10 };
+        let o = JsonOpts {
+            max_depth: 3,
+            max_array: 5,
+            max_string: 10,
+        };
         let p = prune_json(&v, o.max_depth, &o);
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("…+95 more items"));
