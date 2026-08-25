@@ -51,15 +51,19 @@ fn env_str(key: &str, default: &str) -> String {
 }
 
 fn s_arg(a: &Value, k: &str) -> Option<String> {
-    a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string())
+    a.get(k)
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string)
 }
 fn u_arg(a: &Value, k: &str) -> Option<usize> {
-    a.get(k).and_then(|v| v.as_u64()).map(|v| v as usize)
+    a.get(k)
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as usize)
 }
 fn b_arg(a: &Value, k: &str) -> Option<bool> {
-    a.get(k).and_then(|v| v.as_bool())
+    a.get(k).and_then(serde_json::Value::as_bool)
 }
-/// Accept either ["a","b"] or "a,b" for list-valued arguments.
+/// Accept either `["a","b"]` or `"a,b"` for list-valued arguments.
 fn list_arg(a: &Value, k: &str) -> Vec<String> {
     match a.get(k) {
         Some(Value::Array(items)) => items
@@ -417,7 +421,7 @@ fn token_count(a: &Value) -> Result<String, String> {
         (None, None) => return Err("provide either 'text' or 'path'".into()),
     };
     let chars = text.chars().count();
-    let ascii = text.chars().filter(|c| c.is_ascii()).count();
+    let ascii = text.chars().filter(char::is_ascii).count();
     let lines = text.lines().count();
     Ok(format!(
         "[token-slim] {label}: ≈{} tokens (chars={chars}, ascii={ascii}, non-ascii={}, lines={lines}) heuristic ±20%",
@@ -448,17 +452,15 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>, exclude: &[S
     if files.len() >= MAX_FILES_SCANNED {
         return;
     }
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
     let mut dirs: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let p = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        let ft = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(ft) = entry.file_type() else {
+            continue;
         };
         if ft.is_symlink() {
             continue;
@@ -497,7 +499,7 @@ fn grep_slim(a: &Value) -> Result<String, String> {
     let include = list_arg(a, "include");
     let mut exclude = list_arg(a, "exclude");
     if b_arg(a, "exclude_tests").unwrap_or(false) {
-        exclude.extend(TEST_GLOBS.iter().map(|g| g.to_string()));
+        exclude.extend(TEST_GLOBS.iter().map(std::string::ToString::to_string));
     }
 
     let pat = if literal {
@@ -544,16 +546,14 @@ fn grep_slim(a: &Value) -> Result<String, String> {
             skipped += 1;
             continue;
         }
-        let meta = match fs::metadata(file) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(meta) = fs::metadata(file) else {
+            continue;
         };
         if meta.len() > MAX_FILE_BYTES {
             continue;
         }
-        let raw = match fs::read(file) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(raw) = fs::read(file) else {
+            continue;
         };
         if raw.iter().take(4096).any(|b| *b == 0) {
             continue;
@@ -583,7 +583,11 @@ fn grep_slim(a: &Value) -> Result<String, String> {
         filters.push(format!("include={}", include.join(",")));
     }
     if !exclude.is_empty() {
-        let shown: Vec<&str> = exclude.iter().take(3).map(|s| s.as_str()).collect();
+        let shown: Vec<&str> = exclude
+            .iter()
+            .take(3)
+            .map(std::string::String::as_str)
+            .collect();
         let more = exclude.len().saturating_sub(shown.len());
         filters.push(format!(
             "exclude={}{}",
@@ -658,17 +662,15 @@ fn walk_map(
     if level >= max_depth || *count >= max_entries {
         return;
     }
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
     let mut dirs: Vec<(String, PathBuf)> = Vec::new();
     let mut files: Vec<(String, u64)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let ft = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
+        let Ok(ft) = entry.file_type() else {
+            continue;
         };
         if ft.is_symlink() {
             continue;
@@ -766,15 +768,17 @@ fn load_files(a: &Value, root_path: &Path) -> Result<Vec<LoadedFile>, String> {
             Ok(m) if m.len() <= MAX_FILE_BYTES => {}
             _ => continue,
         }
-        let raw = match fs::read(&file) {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(raw) = fs::read(&file) else {
+            continue;
         };
         if raw.iter().take(4096).any(|b| *b == 0) {
             continue;
         }
         let is_test = any_match(
-            &TEST_GLOBS.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
+            &TEST_GLOBS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>(),
             &rel,
         );
         out.push(LoadedFile {

@@ -27,7 +27,7 @@ pub fn saved_pct(orig: usize, new: usize) -> String {
 }
 
 /// Cap `text` to roughly `max` tokens, keeping head (~70%) and tail (~20%)
-/// with a snip marker in between. Returns (text, was_truncated).
+/// with a snip marker in between. Returns (text, `was_truncated`).
 pub fn truncate_tokens(text: &str, max: usize) -> (String, bool) {
     if estimate_tokens(text) <= max {
         return (text.to_string(), false);

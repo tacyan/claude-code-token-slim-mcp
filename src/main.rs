@@ -16,10 +16,7 @@ fn main() {
     let mut out = stdout.lock();
 
     for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+        let Ok(line) = line else { break };
         let line = line.trim();
         if line.is_empty() {
             continue;
