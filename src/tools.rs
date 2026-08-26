@@ -806,11 +806,12 @@ fn scan_symbol(
         if !word.is_match(&f.content) {
             continue; // whole-file reject: most files never mention the symbol
         }
-        for (i, line) in f.content.lines().enumerate() {
+        let lines: Vec<&str> = f.content.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
             if !word.is_match(line) {
                 continue;
             }
-            let kind = pats.classify(line, f.is_test);
+            let kind = pats.classify(&lines, i, f.is_test);
             let enclosing =
                 if resolve_enclosing && matches!(kind, RefKind::Call | RefKind::TestCall) {
                     refs::enclosing_symbol(&f.content, i + 1)
@@ -919,7 +920,26 @@ fn refs_slim(a: &Value) -> Result<String, String> {
         }
         hop2.sort();
         if hop2.is_empty() {
-            body.push("hop2 (no further callers)".to_string());
+            // "No further callers" and "could not work out who the callers
+            // are" are different answers, and only one of them is a fact. The
+            // scope resolver tracks brace depth, so in an indentation-based
+            // language (Python, Ruby, F#) no call site can be attributed and
+            // the frontier is empty for a reason that has nothing to do with
+            // the code. Saying "none" there would be a confident wrong answer.
+            let calls = hits.iter().filter(|h| h.kind == RefKind::Call).count();
+            let attributed = hits
+                .iter()
+                .filter(|h| h.kind == RefKind::Call && h.enclosing.is_some())
+                .count();
+            if calls > 0 && attributed == 0 {
+                body.push(
+                    "hop2 (unavailable: no call site could be attributed to an enclosing \
+function — depth=2 needs a brace-delimited language)"
+                        .to_string(),
+                );
+            } else {
+                body.push("hop2 (no further callers)".to_string());
+            }
         } else {
             body.extend(hop2);
         }
