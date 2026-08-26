@@ -202,6 +202,7 @@ static SIG_RE: OnceLock<Regex> = OnceLock::new();
 static ARROW_RE: OnceLock<Regex> = OnceLock::new();
 static METHOD_RE: OnceLock<Regex> = OnceLock::new();
 static NOT_METHOD_RE: OnceLock<Regex> = OnceLock::new();
+static WRAPPED_SIG_RE: OnceLock<Regex> = OnceLock::new();
 static MD_RE: OnceLock<Regex> = OnceLock::new();
 
 fn sig_re() -> &'static Regex {
@@ -235,14 +236,53 @@ fn method_re() -> &'static Regex {
                 // Interface member with a return type and no body:
                 // `  set(text: string): void`
                 r"|^[ \t]+{mods}(?:\*\s*)?[A-Za-z_$][\w$]*\s*(?:<[^>()]*>)?\s*{args}\s*:[^={{;]+;?\s*$",
-                // Argument list that wraps onto the next line: `  static async create(`
-                r"|^[ \t]+{mods}(?:\*\s*)?[A-Za-z_$][\w$]*\s*(?:<[^>()]*>)?\s*\(\s*$",
             ),
             mods = MODS,
             args = ARGS,
         ))
         .unwrap()
     })
+}
+
+/// An identifier and an opening parenthesis with nothing after it. This is a
+/// declaration whose argument list wraps (`static async create(`) — and it is
+/// also, character for character, a CALL whose arguments wrap
+/// (`registerHandler(`). The line alone cannot tell them apart; see
+/// [`wrapped_signature_opens_body`].
+fn wrapped_sig_re() -> &'static Regex {
+    WRAPPED_SIG_RE.get_or_init(|| {
+        Regex::new(
+            r"^[ \t]+(?:(?:pub|public|private|protected|internal|static|async|abstract|override|final|readonly|get|set|open|suspend)\s+)*(?:\*\s*)?[A-Za-z_$][\w$]*\s*(?:<[^>()]*>)?\s*\(\s*$",
+        )
+        .unwrap()
+    })
+}
+
+/// How far ahead to look for the line that closes a wrapped argument list. A
+/// parameter list longer than this is not a signature anyone is reading.
+const MAX_SIGNATURE_LOOKAHEAD: usize = 40;
+
+/// Decide whether the wrapped argument list starting at `start` belongs to a
+/// declaration. Only the line that closes the list can say: a declaration
+/// continues into a body (`) {`) or names a return type (`): void`), while a
+/// call just ends (`)`, `),`, `);`).
+fn wrapped_signature_opens_body(lines: &[&str], start: usize) -> bool {
+    let mut parens = 0i32;
+    for line in lines.iter().skip(start).take(MAX_SIGNATURE_LOOKAHEAD) {
+        for c in line.chars() {
+            match c {
+                '(' => parens += 1,
+                ')' => parens -= 1,
+                _ => {}
+            }
+        }
+        if parens <= 0 {
+            // Everything after the closing parenthesis decides it.
+            let tail = line.rsplit(')').next().unwrap_or("");
+            return tail.contains('{') || tail.trim_start().starts_with(':');
+        }
+    }
+    false
 }
 
 /// Control flow and statement shapes that [`method_re`] would otherwise claim:
@@ -269,6 +309,23 @@ pub fn is_signature(line: &str, is_md: bool) -> bool {
         || (method_re().is_match(line) && !not_method_re().is_match(line))
 }
 
+/// [`is_signature`] with the surrounding lines available, which is what a
+/// wrapped argument list needs: `registerHandler(` and `static async create(`
+/// are the same shape, and only the line that closes the list separates the
+/// call from the declaration. Callers that have the whole file — the outline
+/// and `refs_slim`'s scope resolver — should use this so neither of them
+/// reports a multi-line call as structure.
+pub fn is_signature_at(lines: &[&str], i: usize, is_md: bool) -> bool {
+    let line = lines[i];
+    if is_signature(line, is_md) {
+        return true;
+    }
+    !is_md
+        && wrapped_sig_re().is_match(line)
+        && !not_method_re().is_match(line)
+        && wrapped_signature_opens_body(lines, i)
+}
+
 fn arrow_re() -> &'static Regex {
     ARROW_RE.get_or_init(|| {
         Regex::new(
@@ -287,9 +344,9 @@ fn md_re() -> &'static Regex {
 pub fn outline_opt(src: &str, ext: &str) -> Option<String> {
     let mut out: Vec<String> = Vec::new();
     let is_md = matches!(ext, "md" | "mdx" | "markdown");
-    for (i, line) in src.lines().enumerate() {
-        let hit = is_signature(line, is_md);
-        if hit {
+    let lines: Vec<&str> = src.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if is_signature_at(&lines, i, is_md) {
             let mut disp = line.trim_end().to_string();
             if disp.chars().count() > 160 {
                 disp = disp.chars().take(160).collect::<String>() + "…";
@@ -512,6 +569,37 @@ mod tests {
         assert!(out.contains("L3: pub fn hello"));
         assert!(out.contains("L6: struct Foo;"));
         assert!(!out.contains("use std"));
+    }
+
+    #[test]
+    fn outline_skips_a_call_whose_arguments_wrap() {
+        // A multi-line call and a multi-line declaration are the same shape on
+        // their opening line; only the closing line separates them. Listing
+        // the call put a plain statement in the outline as if it were
+        // structure.
+        let src = "\
+export class C {
+  run(): void {
+    someLongFunctionCall(
+      argumentOne,
+    )
+  }
+  static async create(
+    device: GPUDevice,
+  ): Promise<C> {
+    return new C()
+  }
+  bodyless(
+    n: number,
+  ): void
+}
+";
+        let out = outline(src, "ts");
+        assert!(!out.contains("someLongFunctionCall"), "got: {out}");
+        // The declarations it resembles are still found.
+        assert!(out.contains("static async create("), "got: {out}");
+        assert!(out.contains("bodyless("), "got: {out}");
+        assert!(out.contains("run(): void {"), "got: {out}");
     }
 
     #[test]

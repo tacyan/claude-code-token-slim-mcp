@@ -89,9 +89,14 @@ impl SymbolPatterns {
         })
     }
 
-    /// Classify one matching line. `in_test_file` comes from the path, not the
-    /// content, so a helper named `test` in production code is not miscounted.
-    pub fn classify(&self, line: &str, in_test_file: bool) -> RefKind {
+    /// Classify the reference on line `i`. The surrounding lines are needed
+    /// because a declaration whose argument list wraps (`private constructor(`)
+    /// is the same shape as a call whose arguments wrap (`registerHandler(`);
+    /// only the line that closes the list tells them apart. `in_test_file`
+    /// comes from the path, not the content, so a helper named `test` in
+    /// production code is not miscounted.
+    pub fn classify(&self, lines: &[&str], i: usize, in_test_file: bool) -> RefKind {
+        let line = lines[i];
         let t = line.trim_start();
         if t.starts_with("//") || t.starts_with("/*") || t.starts_with('*') || t.starts_with("#") {
             return RefKind::Comment;
@@ -105,7 +110,7 @@ impl SymbolPatterns {
         if self.def.is_match(line) {
             return RefKind::Definition;
         }
-        if slim::is_signature(line, false)
+        if slim::is_signature_at(lines, i, false)
             && signature_name(line).as_deref() == Some(self.symbol.as_str())
         {
             return RefKind::Definition;
@@ -204,11 +209,12 @@ pub fn enclosing_symbol(src: &str, line_no: usize) -> Option<String> {
     // next unrelated `{` in the file.
     let mut pending: Option<String> = None;
     let mut open_parens = 0i32;
-    for (i, line) in src.lines().enumerate() {
+    let lines: Vec<&str> = src.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
         if i + 1 > line_no {
             break;
         }
-        let name = if slim::is_signature(line, false) {
+        let name = if slim::is_signature_at(&lines, i, false) {
             signature_name(line)
         } else {
             None
@@ -228,7 +234,11 @@ pub fn enclosing_symbol(src: &str, line_no: usize) -> Option<String> {
             } else {
                 pending = None;
             }
-        } else if depth > before {
+        } else if depth > before && open_parens == 0 {
+            // The held name only owns this brace if the brace arrives on the
+            // line that closes its argument list (`) {`). Anything opened
+            // while the list is still open belongs to something inside it —
+            // a callback body, not the declaration.
             if let Some(nm) = pending.take() {
                 stack.push((nm, before));
             }
@@ -258,27 +268,31 @@ mod tests {
     fn classifies_the_shapes_grep_cannot_tell_apart() {
         let p = pats();
         assert_eq!(
-            p.classify("export function computeFrameComp(input: I): O {", false),
+            p.classify(
+                &["export function computeFrameComp(input: I): O {"],
+                0,
+                false
+            ),
             RefKind::Definition
         );
         assert_eq!(
-            p.classify("  const { a } = computeFrameComp({ dt })", false),
+            p.classify(&["  const { a } = computeFrameComp({ dt })"], 0, false),
             RefKind::Call
         );
         assert_eq!(
-            p.classify("  expect(computeFrameComp(x)).toBe(1)", true),
+            p.classify(&["  expect(computeFrameComp(x)).toBe(1)"], 0, true),
             RefKind::TestCall
         );
         assert_eq!(
-            p.classify("import { computeFrameComp } from './m'", false),
+            p.classify(&["import { computeFrameComp } from './m'"], 0, false),
             RefKind::Import
         );
         assert_eq!(
-            p.classify("  // computeFrameComp is shared", false),
+            p.classify(&["  // computeFrameComp is shared"], 0, false),
             RefKind::Comment
         );
         assert_eq!(
-            p.classify("  type T = typeof computeFrameComp", false),
+            p.classify(&["  type T = typeof computeFrameComp"], 0, false),
             RefKind::Mention
         );
     }
@@ -287,11 +301,11 @@ mod tests {
     fn a_method_declaration_is_not_a_call_to_itself() {
         let p = SymbolPatterns::new("frame").unwrap();
         assert_eq!(
-            p.classify("  frame(dt: number, time: number): void {", false),
+            p.classify(&["  frame(dt: number, time: number): void {"], 0, false),
             RefKind::Definition
         );
         assert_eq!(
-            p.classify("    this.renderer.frame(dt, time)", false),
+            p.classify(&["    this.renderer.frame(dt, time)"], 0, false),
             RefKind::Call
         );
     }
@@ -391,6 +405,28 @@ export class R {
         assert_eq!(enclosing_symbol(src, 4).as_deref(), Some("frame"));
         assert_eq!(enclosing_symbol(src, 6).as_deref(), Some("frame"));
         assert_eq!(enclosing_symbol(src, 8).as_deref(), Some("frame"));
+    }
+
+    #[test]
+    fn a_wrapped_call_does_not_own_the_brace_its_callback_opens() {
+        // `registerHandler(` is the same shape as `static async create(`, so
+        // holding it pending made it claim the brace its own callback opened
+        // and report `registerHandler` as the caller of everything inside.
+        let src = "\
+export class C {
+  run(): void {
+    registerHandler(
+      'name',
+      () => {
+        target(1)
+      },
+    )
+    target(2)
+  }
+}
+";
+        assert_eq!(enclosing_symbol(src, 6).as_deref(), Some("run"));
+        assert_eq!(enclosing_symbol(src, 9).as_deref(), Some("run"));
     }
 
     #[test]
